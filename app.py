@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import requests
 from io import StringIO
+from datetime import datetime
 
 # =========================================================
 # CONFIG
@@ -21,15 +22,36 @@ def load_data():
     url = "https://raw.githubusercontent.com/PabloJ91011/MAPAS/main/otif_h3.csv"
     r = requests.get(url)
     r.raise_for_status()
-    return pd.read_csv(StringIO(r.text))
 
-df = load_data()
+    df = pd.read_csv(StringIO(r.text))
+
+    return df, datetime.now()
+
+df, last_update = load_data()
 
 # =========================================================
-# LIMPIEZA DPS (evitar errores de tipo)
+# BOTÓN DE ACTUALIZACIÓN
+# =========================================================
+
+if st.button("🔄 Actualizar datos"):
+    st.cache_data.clear()
+    st.rerun()
+
+# =========================================================
+# LIMPIEZA DPS
 # =========================================================
 
 df["dps"] = df["dps"].astype(str)
+
+# =========================================================
+# HEADER
+# =========================================================
+
+st.title("📊 OTIF Dashboard")
+
+st.caption(
+    f"🕒 Última actualización: {last_update.strftime('%Y-%m-%d %H:%M:%S')}"
+)
 
 # =========================================================
 # FILTRO DPS
@@ -55,20 +77,13 @@ df = df[df["dps"].isin(selected_dps)]
 # KPIs
 # =========================================================
 
-st.title("📊 OTIF Dashboard")
-
 c1, c2, c3, c4, c5, c6 = st.columns(6)
 
 c1.metric("Clientes", f"{df['cliente'].nunique():,}")
-
 c2.metric("Pedidos", f"{df['entregas_totales'].sum():,.0f}")
-
 c3.metric("OK", f"{df['entregas_ok'].sum():,.0f}")
-
 c4.metric("RECH", f"{df['entregas_rech'].sum():,.0f}")
-
 c5.metric("SUS", f"{df['entregas_sus'].sum():,.0f}")
-
 c6.metric("FLEX", f"{df['entregas_flex'].sum():,.0f}")
 
 # =========================================================
