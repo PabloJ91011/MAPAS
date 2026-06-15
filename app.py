@@ -25,6 +25,7 @@ def load_data():
     r.raise_for_status()
     return pd.read_csv(StringIO(r.text))
 
+
 df = load_data()
 
 # =========================================================
@@ -33,11 +34,11 @@ df = load_data()
 
 df.columns = df.columns.str.strip()
 
-# Convertir IDs a texto limpio
-df["cliente"] = df["cliente"].fillna(0).astype(int).astype(str)
-df["dps"] = df["dps"].fillna(0).astype(int).astype(str)
+# IDs seguros
+df["cliente"] = pd.to_numeric(df["cliente"], errors="coerce").fillna(0).astype(int).astype(str)
+df["dps"] = pd.to_numeric(df["dps"], errors="coerce").fillna(0).astype(int).astype(str)
 
-# Texto seguro
+# Columnas texto
 text_cols = [
     "cliente_nombre",
     "madurez_cliente",
@@ -51,15 +52,30 @@ text_cols = [
 
 for col in text_cols:
     if col in df.columns:
-        df[col] = df[col].fillna("SIN DATO").astype(str)
+        df[col] = df[col].fillna("SIN DATO").astype(str).str.strip()
 
-# Numéricos seguros
+# Columnas numéricas
 num_cols = [
-    "entregas_totales", "entregas_rech", "entregas_sus", "entregas_ok",
-    "entregas_flex", "entregas_fee", "rech_flex", "sus_flex", "ok_flex",
-    "rech_fee", "sus_fee", "ok_fee", "dias_activos", "x", "y",
-    "hl_comprados", "hl_rechazados", "semanas_activas",
-    "frecuencia_semanal", "codigo_motivo_principal"
+    "entregas_totales",
+    "entregas_rech",
+    "entregas_sus",
+    "entregas_ok",
+    "entregas_flex",
+    "entregas_fee",
+    "rech_flex",
+    "sus_flex",
+    "ok_flex",
+    "rech_fee",
+    "sus_fee",
+    "ok_fee",
+    "dias_activos",
+    "x",
+    "y",
+    "hl_comprados",
+    "hl_rechazados",
+    "semanas_activas",
+    "frecuencia_semanal",
+    "codigo_motivo_principal"
 ]
 
 for col in num_cols:
@@ -71,7 +87,7 @@ df["entregas_totales"] = df["entregas_totales"].replace(0, 1)
 df["hl_comprados"] = df["hl_comprados"].replace(0, 1)
 df["frecuencia_semanal"] = df["frecuencia_semanal"].replace(0, 0.1)
 
-# Fechas
+# Fecha
 df["primera_fecha_entrega"] = pd.to_datetime(
     df["primera_fecha_entrega"],
     errors="coerce",
@@ -79,40 +95,21 @@ df["primera_fecha_entrega"] = pd.to_datetime(
 )
 
 # =========================================================
-# FEATURES OPERATIVAS
+# FEATURES BASE
 # =========================================================
 
-df["rech_rate"] = df["entregas_rech"] / df["entregas_totales"]
-df["hl_impacto"] = df["hl_rechazados"] / df["hl_comprados"]
+df["pct_rechazo"] = df["entregas_rech"] / df["entregas_totales"]
+df["pct_hl_rechazado"] = df["hl_rechazados"] / df["hl_comprados"]
 df["hl_entregados_estimados"] = df["hl_comprados"] - df["hl_rechazados"]
 
-# Normalizaciones seguras
-max_hl_rech = max(df["hl_rechazados"].max(), 0.01)
-max_rech_rate = max(df["rech_rate"].max(), 0.01)
-max_freq = max(df["frecuencia_semanal"].max(), 0.01)
-
-df["hl_norm"] = df["hl_rechazados"] / max_hl_rech
-df["rech_norm"] = df["rech_rate"] / max_rech_rate
-df["freq_norm"] = df["frecuencia_semanal"] / max_freq
-
-# Score de oportunidad: volumen + rechazo + frecuencia
-df["score_oportunidad"] = (
-    df["hl_norm"] * 0.60 +
-    df["rech_norm"] * 0.25 +
-    df["freq_norm"] * 0.15
-)
-
-def clasificar_prioridad(score):
-    if score >= 0.75:
-        return "🔥 CRÍTICA"
-    elif score >= 0.50:
-        return "🟠 ALTA"
-    elif score >= 0.25:
-        return "🟡 MEDIA"
-    else:
-        return "🟢 BAJA"
-
-df["prioridad"] = df["score_oportunidad"].apply(clasificar_prioridad)
+# Si no existe HL suspendidos real, se estima proporcionalmente
+if "hl_suspendidos" not in df.columns:
+    df["hl_suspendidos"] = (
+        df["hl_comprados"] *
+        (df["entregas_sus"] / df["entregas_totales"])
+    )
+else:
+    df["hl_suspendidos"] = pd.to_numeric(df["hl_suspendidos"], errors="coerce").fillna(0)
 
 # =========================================================
 # MOTOR DE ACCIONES
@@ -125,33 +122,39 @@ def accion_operativa(row):
 
     if "LOCAL CERRADO" in motivo:
         return (
-            f"Revisar ventana de entrega. Cliente suele recibir en {ventana_ok}. "
+            f"Revisar ventanas de entrega. El cliente normalmente recibe en {ventana_ok}. "
             f"Los rechazos por local cerrado aparecen en {ventana_cerrado}. "
-            f"Contactar cliente y ajustar la visita a la ventana más efectiva."
+            f"Contactar al cliente y ajustar la entrega a la ventana más efectiva."
         )
 
     elif "SIN DINERO" in motivo or "DINERO" in motivo:
         return (
-            "Contactar cliente antes del despacho para confirmar disponibilidad de pago. "
-            "Si no puede recibir, reprogramar antes de cargar ruta."
+            "Contactar al cliente antes del despacho para confirmar disponibilidad de pago. "
+            "Si no podrá recibir, reprogramar antes de cargar la ruta."
         )
 
     elif "NO RECIBE" in motivo or "RECHAZA" in motivo:
         return (
-            "Realizar llamada preventiva antes del despacho para confirmar recepción. "
-            "Validar responsable del local y horario disponible."
+            "Realizar llamada preventiva antes de programar la entrega. "
+            "Validar responsable de recepción, horario disponible y voluntad de recibir."
         )
 
-    elif "DIRECCION" in motivo or "DIRECCIÓN" in motivo:
+    elif "DIRECCION" in motivo or "DIRECCIÓN" in motivo or "NO UBICADO" in motivo:
         return (
-            "Validar geolocalización, referencias del domicilio y datos del cliente. "
-            "Actualizar ubicación antes de volver a programar."
+            "Validar ubicación, referencias del domicilio y geolocalización. "
+            "Actualizar datos antes de volver a programar la entrega."
         )
 
-    elif "PEDIDO" in motivo:
+    elif "MAL PEDIDO" in motivo or "PEDIDO" in motivo:
         return (
-            "Revisar consistencia del pedido con ventas. Confirmar cantidades y productos "
-            "antes de despacho."
+            "Revisar consistencia del pedido con ventas. Confirmar cantidades, productos "
+            "y necesidad real antes del despacho."
+        )
+
+    elif "STOCK" in motivo:
+        return (
+            "Validar disponibilidad y causa de stock. Coordinar con planificación para evitar "
+            "rechazos o incumplimientos por faltantes."
         )
 
     elif row["entregas_rech"] >= 5 and row["hl_rechazados"] > 0:
@@ -162,10 +165,10 @@ def accion_operativa(row):
 
     else:
         return (
-            "Revisar historial operativo del cliente y validar causa real del rechazo."
+            "Revisar historial operativo del cliente, validar causa real del rechazo "
+            "y definir acción con reparto/ventas."
         )
 
-df["accion_recomendada"] = df.apply(accion_operativa, axis=1)
 
 def tipo_gestion(row):
     motivo = str(row["motivo_rechazo_principal"]).upper()
@@ -176,413 +179,204 @@ def tipo_gestion(row):
         return "Confirmación de pago"
     elif "NO RECIBE" in motivo or "RECHAZA" in motivo:
         return "Llamada preventiva"
-    elif "DIRECCION" in motivo or "DIRECCIÓN" in motivo:
+    elif "DIRECCION" in motivo or "DIRECCIÓN" in motivo or "NO UBICADO" in motivo:
         return "Validación de ubicación"
-    elif row["score_oportunidad"] >= 0.5:
-        return "Gestión prioritaria"
+    elif "PEDIDO" in motivo:
+        return "Validación pedido"
+    elif "STOCK" in motivo:
+        return "Validación stock"
     else:
-        return "Monitoreo"
+        return "Revisión operativa"
 
+
+df["accion_recomendada"] = df.apply(accion_operativa, axis=1)
 df["tipo_gestion"] = df.apply(tipo_gestion, axis=1)
 
 # =========================================================
-# SIDEBAR FILTROS
+# FUNCIONES DE SCORE
 # =========================================================
 
-st.sidebar.title("🔎 Filtros")
+def normalizar_serie(s):
+    max_val = s.max()
+    if pd.isna(max_val) or max_val <= 0:
+        return s * 0
+    return s / max_val
 
-dps_sel = st.sidebar.multiselect(
-    "DPS",
-    sorted(df["dps"].unique())
-)
 
-cliente_sel_filtro = st.sidebar.multiselect(
-    "Cliente",
-    sorted(df["cliente_nombre"].unique())
-)
+def calcular_score_criticidad(data):
+    """
+    Score representativo contra el total del filtro.
 
-motivo_sel = st.sidebar.multiselect(
-    "Motivo rechazo",
-    sorted(df["motivo_rechazo_principal"].unique())
-)
+    Combina:
+    - Cantidad de rechazos del cliente vs total de rechazos del filtro
+    - HL rechazados del cliente vs total HL rechazado del filtro
+    - % rechazo ajustado por representatividad de entregas
+    - % HL rechazado ajustado por representatividad de HL comprado
 
-madurez_sel = st.sidebar.multiselect(
-    "Madurez",
-    sorted(df["madurez_cliente"].unique())
-)
+    Así evitamos que un cliente con 1 entrega y 100% rechazo salga arriba
+    si no representa volumen ni cantidad relevante.
+    """
 
-prioridad_sel = st.sidebar.multiselect(
-    "Prioridad",
-    sorted(df["prioridad"].unique())
-)
+    base = data.copy()
 
-df_filtrado = df.copy()
+    total_rechazos_filtro = max(base["entregas_rech"].sum(), 1)
+    total_hl_rech_filtro = max(base["hl_rechazados"].sum(), 0.01)
+    total_entregas_filtro = max(base["entregas_totales"].sum(), 1)
+    total_hl_comprados_filtro = max(base["hl_comprados"].sum(), 0.01)
 
-if dps_sel:
-    df_filtrado = df_filtrado[df_filtrado["dps"].isin(dps_sel)]
+    base["participacion_rechazos"] = (
+        base["entregas_rech"] / total_rechazos_filtro
+    )
 
-if cliente_sel_filtro:
-    df_filtrado = df_filtrado[df_filtrado["cliente_nombre"].isin(cliente_sel_filtro)]
+    base["participacion_hl_rechazado"] = (
+        base["hl_rechazados"] / total_hl_rech_filtro
+    )
 
-if motivo_sel:
-    df_filtrado = df_filtrado[df_filtrado["motivo_rechazo_principal"].isin(motivo_sel)]
+    base["participacion_entregas"] = (
+        base["entregas_totales"] / total_entregas_filtro
+    )
 
-if madurez_sel:
-    df_filtrado = df_filtrado[df_filtrado["madurez_cliente"].isin(madurez_sel)]
+    base["participacion_hl_comprados"] = (
+        base["hl_comprados"] / total_hl_comprados_filtro
+    )
 
-if prioridad_sel:
-    df_filtrado = df_filtrado[df_filtrado["prioridad"].isin(prioridad_sel)]
+    # % rechazo ponderado por representatividad
+    base["pct_rechazo_representativo"] = (
+        base["pct_rechazo"] *
+        (base["participacion_entregas"] ** 0.5)
+    )
 
-# =========================================================
-# HEADER
-# =========================================================
+    # % HL rechazado ponderado por representatividad
+    base["pct_hl_rechazado_representativo"] = (
+        base["pct_hl_rechazado"] *
+        (base["participacion_hl_comprados"] ** 0.5)
+    )
 
-st.title("🚀 Centro de Oportunidades Operativas")
-st.caption("Priorización de clientes para recuperar HL, reducir rechazos y mejorar entregas.")
+    base["comp_cantidad_rechazos"] = normalizar_serie(base["participacion_rechazos"])
+    base["comp_hl_rechazado"] = normalizar_serie(base["participacion_hl_rechazado"])
+    base["comp_pct_rechazo"] = normalizar_serie(base["pct_rechazo_representativo"])
+    base["comp_pct_hl"] = normalizar_serie(base["pct_hl_rechazado_representativo"])
 
-if df_filtrado.empty:
-    st.warning("No hay datos con los filtros seleccionados.")
-    st.stop()
+    base["score_criticidad"] = 100 * (
+        base["comp_cantidad_rechazos"] * 0.30 +
+        base["comp_hl_rechazado"] * 0.35 +
+        base["comp_pct_rechazo"] * 0.20 +
+        base["comp_pct_hl"] * 0.15
+    )
 
-# =========================================================
-# KPIs
-# =========================================================
+    return base
 
-st.subheader("📊 Resumen Ejecutivo")
 
-total_clientes = df_filtrado["cliente"].nunique()
-total_entregas = df_filtrado["entregas_totales"].sum()
-total_rechazos = df_filtrado["entregas_rech"].sum()
-total_ok = df_filtrado["entregas_ok"].sum()
-hl_comprados = df_filtrado["hl_comprados"].sum()
-hl_rechazados = df_filtrado["hl_rechazados"].sum()
-rechazo_pct = total_rechazos / max(total_entregas, 1)
-impacto_hl = hl_rechazados / max(hl_comprados, 1)
-freq_prom = df_filtrado["frecuencia_semanal"].mean()
+def clasificar_prioridad(score):
+    if score >= 75:
+        return "🔥 CRÍTICA"
+    elif score >= 50:
+        return "🟠 ALTA"
+    elif score >= 25:
+        return "🟡 MEDIA"
+    else:
+        return "🟢 BAJA"
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Clientes", f"{total_clientes:,}")
-c2.metric("Entregas", f"{int(total_entregas):,}")
-c3.metric("Rechazos", f"{int(total_rechazos):,}", f"{rechazo_pct:.1%}")
-c4.metric("Entregas OK", f"{int(total_ok):,}")
-
-c5, c6, c7, c8 = st.columns(4)
-c5.metric("HL Comprados", f"{hl_comprados:,.1f}")
-c6.metric("HL Rechazados", f"{hl_rechazados:,.1f}", f"{impacto_hl:.1%}")
-c7.metric("Frecuencia Prom.", f"{freq_prom:.2f}")
-c8.metric("Clientes Críticos/Alta", int(df_filtrado["prioridad"].isin(["🔥 CRÍTICA", "🟠 ALTA"]).sum()))
-
-# =========================================================
-# TOP 10 OPORTUNIDADES
-# =========================================================
-
-st.subheader("🎯 Top 10 Clientes a Intervenir")
-
-top10 = (
-    df_filtrado
-    .sort_values("score_oportunidad", ascending=False)
-    .head(10)
-    .copy()
-)
-
-hl_top10 = top10["hl_rechazados"].sum()
-participacion_top10 = hl_top10 / max(df_filtrado["hl_rechazados"].sum(), 1)
-
-a1, a2, a3 = st.columns(3)
-a1.metric("HL Recuperable Top 10", f"{hl_top10:,.1f}")
-a2.metric("Participación Top 10", f"{participacion_top10:.1%}")
-a3.metric("Rechazos Top 10", int(top10["entregas_rech"].sum()))
-
-cols_top = [
-    "cliente",
-    "cliente_nombre",
-    "dps",
-    "score_oportunidad",
-    "prioridad",
-    "hl_rechazados",
-    "hl_comprados",
-    "rech_rate",
-    "entregas_rech",
-    "frecuencia_semanal",
-    "motivo_rechazo_principal",
-    "tipo_gestion",
-    "accion_recomendada"
-]
-
-st.dataframe(
-    top10[cols_top].style.format({
-        "score_oportunidad": "{:.2f}",
-        "hl_rechazados": "{:.2f}",
-        "hl_comprados": "{:.2f}",
-        "rech_rate": "{:.1%}",
-        "frecuencia_semanal": "{:.2f}"
-    }),
-    use_container_width=True,
-    height=360
-)
 
 # =========================================================
-# PLAN AUTOMÁTICO
+# FUNCIONES HTML
 # =========================================================
 
-st.subheader("🧠 Plan de Acción Recomendado")
+def generar_html_fichas(clientes_df):
+    bloques = []
 
-for _, row in top10.iterrows():
-    st.markdown(
-        f"""
-        **{row['prioridad']} | {row['cliente_nombre']} | DPS {row['dps']}**  
-        HL rechazados: **{row['hl_rechazados']:.2f}** | Rechazos: **{int(row['entregas_rech'])}** | Score: **{row['score_oportunidad']:.2f}**  
-        👉 {row['accion_recomendada']}
+    for _, row in clientes_df.iterrows():
+        nombre = html.escape(str(row["cliente_nombre"]))
+        accion = html.escape(str(row["accion_recomendada"]))
+        motivo = html.escape(str(row["motivo_rechazo_principal"]))
+        resumen = html.escape(str(row["resumen_motivos_rechazo"]))
+        ventana_rec = html.escape(str(row["ventana_horaria_recepcion"]))
+        ventana_cerrado = html.escape(str(row["ventana_local_cerrado"]))
+
+        google_maps_url = (
+            f"https://www.google.com/maps?q={row['y']},{row['x']}"
+            if row["x"] != 0 and row["y"] != 0
+            else "#"
+        )
+
+        primera_fecha = (
+            row["primera_fecha_entrega"].date()
+            if pd.notnull(row["primera_fecha_entrega"])
+            else "SIN DATO"
+        )
+
+        bloque = f"""
+        <div class="card">
+            <h1>{row['cliente']} - {nombre}</h1>
+            <p><b>DPS:</b> {row['dps']} | <b>Prioridad:</b> {row['prioridad']} | <b>Score:</b> {row['score_criticidad']:.1f}</p>
+
+            <div class="kpi-container">
+                <div class="kpi"><div class="kpi-title">HL comprados</div><div class="kpi-value">{row['hl_comprados']:.2f}</div></div>
+                <div class="kpi"><div class="kpi-title">HL rechazados</div><div class="kpi-value">{row['hl_rechazados']:.2f}</div></div>
+                <div class="kpi"><div class="kpi-title">% rechazo</div><div class="kpi-value">{row['pct_rechazo']:.1%}</div></div>
+                <div class="kpi"><div class="kpi-title">% HL rechazado</div><div class="kpi-value">{row['pct_hl_rechazado']:.1%}</div></div>
+                <div class="kpi"><div class="kpi-title">Frecuencia semanal</div><div class="kpi-value">{row['frecuencia_semanal']:.2f}</div></div>
+            </div>
+
+            <h2>Acción Recomendada</h2>
+            <div class="action">{accion}</div>
+
+            <h2>Información General</h2>
+            <table>
+                <tr><td>Código cliente</td><td>{row['cliente']}</td></tr>
+                <tr><td>Nombre cliente</td><td>{nombre}</td></tr>
+                <tr><td>DPS</td><td>{row['dps']}</td></tr>
+                <tr><td>Madurez</td><td>{row['madurez_cliente']}</td></tr>
+                <tr><td>Primera fecha entrega</td><td>{primera_fecha}</td></tr>
+                <tr><td>Ubicación</td><td><a href="{google_maps_url}" target="_blank">Abrir en Google Maps</a></td></tr>
+                <tr><td>Longitud</td><td>{row['x']}</td></tr>
+                <tr><td>Latitud</td><td>{row['y']}</td></tr>
+            </table>
+
+            <h2>Operación</h2>
+            <table>
+                <tr><td>Entregas totales</td><td>{int(row['entregas_totales'])}</td></tr>
+                <tr><td>Entregas rechazadas</td><td>{int(row['entregas_rech'])}</td></tr>
+                <tr><td>Entregas suspendidas</td><td>{int(row['entregas_sus'])}</td></tr>
+                <tr><td>Entregas OK</td><td>{int(row['entregas_ok'])}</td></tr>
+                <tr><td>Entregas FLEX</td><td>{int(row['entregas_flex'])}</td></tr>
+                <tr><td>Entregas FEE</td><td>{int(row['entregas_fee'])}</td></tr>
+                <tr><td>Días activos</td><td>{int(row['dias_activos'])}</td></tr>
+                <tr><td>Semanas activas</td><td>{row['semanas_activas']:.2f}</td></tr>
+            </table>
+
+            <h2>Volumen</h2>
+            <table>
+                <tr><td>HL comprados</td><td>{row['hl_comprados']:.2f}</td></tr>
+                <tr><td>HL rechazados</td><td>{row['hl_rechazados']:.2f}</td></tr>
+                <tr><td>HL suspendidos estimados</td><td>{row['hl_suspendidos']:.2f}</td></tr>
+                <tr><td>HL entregados estimados</td><td>{row['hl_entregados_estimados']:.2f}</td></tr>
+                <tr><td>% HL rechazado</td><td>{row['pct_hl_rechazado']:.1%}</td></tr>
+            </table>
+
+            <h2>Rechazos y Ventanas</h2>
+            <table>
+                <tr><td>Motivo principal</td><td>{motivo}</td></tr>
+                <tr><td>Código motivo</td><td>{row['codigo_motivo_principal']}</td></tr>
+                <tr><td>Resumen motivos</td><td>{resumen}</td></tr>
+                <tr><td>Ventana horaria recepción</td><td>{ventana_rec}</td></tr>
+                <tr><td>Ventana local cerrado</td><td>{ventana_cerrado}</td></tr>
+                <tr><td>Día entrega</td><td>{row['dia_entrega']}</td></tr>
+                <tr><td>Días flex</td><td>{row['dias_flex']}</td></tr>
+            </table>
+        </div>
         """
-    )
 
-# =========================================================
-# GRÁFICOS
-# =========================================================
+        bloques.append(bloque)
 
-st.subheader("📈 Análisis Visual")
-
-g1, g2 = st.columns(2)
-
-with g1:
-    st.markdown("#### Pareto HL Rechazados")
-    pareto = (
-        df_filtrado
-        .sort_values("hl_rechazados", ascending=False)
-        .head(20)
-    )
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.barh(pareto["cliente_nombre"], pareto["hl_rechazados"])
-    ax.invert_yaxis()
-    ax.set_xlabel("HL Rechazados")
-    ax.set_ylabel("Cliente")
-    st.pyplot(fig)
-
-with g2:
-    st.markdown("#### Motivos de Rechazo")
-    motivos = (
-        df_filtrado["motivo_rechazo_principal"]
-        .value_counts()
-        .head(10)
-    )
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.barh(motivos.index, motivos.values)
-    ax.invert_yaxis()
-    ax.set_xlabel("Cantidad de clientes")
-    ax.set_ylabel("Motivo")
-    st.pyplot(fig)
-
-g3, g4 = st.columns(2)
-
-with g3:
-    st.markdown("#### HL Rechazados por DPS")
-    dps_hl = (
-        df_filtrado
-        .groupby("dps", as_index=False)["hl_rechazados"]
-        .sum()
-        .sort_values("hl_rechazados", ascending=False)
-    )
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    ax.bar(dps_hl["dps"], dps_hl["hl_rechazados"])
-    ax.set_xlabel("DPS")
-    ax.set_ylabel("HL Rechazados")
-    st.pyplot(fig)
-
-with g4:
-    st.markdown("#### Frecuencia vs % Rechazo")
-    fig, ax = plt.subplots(figsize=(10, 5))
-    size = (df_filtrado["hl_rechazados"].clip(lower=0.1) * 30)
-    ax.scatter(
-        df_filtrado["frecuencia_semanal"],
-        df_filtrado["rech_rate"],
-        s=size,
-        alpha=0.6
-    )
-    ax.set_xlabel("Frecuencia semanal")
-    ax.set_ylabel("% Rechazo")
-    st.pyplot(fig)
-
-# =========================================================
-# MAPA GENERAL
-# =========================================================
-
-st.subheader("🗺️ Ubicación de Clientes")
-
-map_df = df_filtrado[
-    (df_filtrado["x"] != 0) &
-    (df_filtrado["y"] != 0)
-][["y", "x", "cliente_nombre", "hl_rechazados", "score_oportunidad"]].copy()
-
-map_df = map_df.rename(columns={"y": "lat", "x": "lon"})
-
-if not map_df.empty:
-    st.map(map_df, latitude="lat", longitude="lon")
-else:
-    st.info("No hay coordenadas válidas para mostrar en mapa.")
-
-# =========================================================
-# TABLA COMPLETA
-# =========================================================
-
-st.subheader("📋 Base Completa Filtrada")
-
-tabla_cols = [
-    "cliente",
-    "cliente_nombre",
-    "dps",
-    "prioridad",
-    "score_oportunidad",
-    "tipo_gestion",
-    "accion_recomendada",
-    "entregas_totales",
-    "entregas_rech",
-    "entregas_sus",
-    "entregas_ok",
-    "rech_rate",
-    "hl_comprados",
-    "hl_rechazados",
-    "hl_impacto",
-    "frecuencia_semanal",
-    "madurez_cliente",
-    "motivo_rechazo_principal",
-    "resumen_motivos_rechazo",
-    "ventana_horaria_recepcion",
-    "ventana_local_cerrado",
-    "dia_entrega",
-    "dias_flex",
-    "x",
-    "y"
-]
-
-tabla_cols = [c for c in tabla_cols if c in df_filtrado.columns]
-
-st.dataframe(
-    df_filtrado[tabla_cols].sort_values("score_oportunidad", ascending=False),
-    use_container_width=True,
-    height=520
-)
-
-csv = df_filtrado[tabla_cols].to_csv(index=False).encode("utf-8-sig")
-
-st.download_button(
-    "📥 Descargar base filtrada CSV",
-    csv,
-    "clientes_oportunidad_operativa.csv",
-    "text/csv"
-)
-
-# =========================================================
-# FICHA CLIENTE
-# =========================================================
-
-st.subheader("🧾 Ficha Cliente")
-
-clientes_disponibles = (
-    df_filtrado
-    .sort_values("score_oportunidad", ascending=False)["cliente_nombre"]
-    .unique()
-)
-
-cliente_sel = st.selectbox(
-    "Selecciona cliente",
-    clientes_disponibles
-)
-
-c = df_filtrado[df_filtrado["cliente_nombre"] == cliente_sel].iloc[0]
-
-f1, f2, f3, f4 = st.columns(4)
-f1.metric("Prioridad", c["prioridad"])
-f2.metric("Score", f"{c['score_oportunidad']:.2f}")
-f3.metric("HL Rechazados", f"{c['hl_rechazados']:.2f}")
-f4.metric("% Rechazo", f"{c['rech_rate']:.1%}")
-
-st.markdown(f"""
-### 📌 {c['cliente_nombre']}
-
-**Cliente:** {c['cliente']}  
-**DPS:** {c['dps']}  
-**Madurez:** {c['madurez_cliente']}  
-**Primera entrega:** {c['primera_fecha_entrega'].date() if pd.notnull(c['primera_fecha_entrega']) else 'SIN DATO'}
-
----
-
-### 📦 Volumen
-
-- **HL Comprados:** {c['hl_comprados']:.2f}
-- **HL Rechazados:** {c['hl_rechazados']:.2f}
-- **HL Entregados estimados:** {c['hl_entregados_estimados']:.2f}
-- **Impacto HL:** {c['hl_impacto']:.1%}
-
----
-
-### 🚚 Operación
-
-- **Entregas Totales:** {int(c['entregas_totales'])}
-- **Entregas OK:** {int(c['entregas_ok'])}
-- **Entregas Rechazadas:** {int(c['entregas_rech'])}
-- **Entregas Suspendidas:** {int(c['entregas_sus'])}
-- **Frecuencia semanal:** {c['frecuencia_semanal']:.2f}
-- **Semanas activas:** {c['semanas_activas']:.2f}
-- **Días activos:** {int(c['dias_activos'])}
-
----
-
-### 🚨 Rechazos
-
-- **Motivo principal:** {c['motivo_rechazo_principal']}
-- **Código motivo:** {c['codigo_motivo_principal']}
-- **Resumen motivos:** {c['resumen_motivos_rechazo']}
-
----
-
-### ⏰ Ventanas
-
-- **Ventana horaria de recepción:** {c['ventana_horaria_recepcion']}
-- **Ventana local cerrado:** {c['ventana_local_cerrado']}
-- **Día entrega:** {c['dia_entrega']}
-- **Días flex:** {c['dias_flex']}
-
----
-
-### ✅ Acción Recomendada
-
-{c['accion_recomendada']}
-""")
-
-if c["x"] != 0 and c["y"] != 0:
-    cliente_map = pd.DataFrame({
-        "lat": [c["y"]],
-        "lon": [c["x"]]
-    })
-    st.map(cliente_map, latitude="lat", longitude="lon")
-
-# =========================================================
-# EXPORTAR FICHA HTML
-# =========================================================
-
-def generar_html_cliente(row):
-    nombre = html.escape(str(row["cliente_nombre"]))
-    accion = html.escape(str(row["accion_recomendada"]))
-    motivo = html.escape(str(row["motivo_rechazo_principal"]))
-    resumen = html.escape(str(row["resumen_motivos_rechazo"]))
-    ventana_rec = html.escape(str(row["ventana_horaria_recepcion"]))
-    ventana_cerrado = html.escape(str(row["ventana_local_cerrado"]))
-
-    google_maps_url = (
-        f"https://www.google.com/maps?q={row['y']},{row['x']}"
-        if row["x"] != 0 and row["y"] != 0
-        else "#"
-    )
+    contenido = "\n".join(bloques)
 
     return f"""
     <!DOCTYPE html>
     <html>
     <head>
         <meta charset="UTF-8">
-        <title>Ficha Cliente - {nombre}</title>
+        <title>Fichas Clientes Operativos</title>
         <style>
             body {{
                 font-family: Arial, sans-serif;
@@ -594,22 +388,20 @@ def generar_html_cliente(row):
                 background: white;
                 padding: 22px;
                 border-radius: 14px;
-                margin-bottom: 18px;
+                margin-bottom: 22px;
                 box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-            }}
-            h1, h2 {{
-                margin-bottom: 8px;
             }}
             .kpi-container {{
                 display: flex;
                 gap: 12px;
                 flex-wrap: wrap;
+                margin: 16px 0;
             }}
             .kpi {{
                 background: #f0f3f6;
                 padding: 16px;
                 border-radius: 12px;
-                min-width: 180px;
+                min-width: 170px;
             }}
             .kpi-title {{
                 font-size: 13px;
@@ -624,12 +416,13 @@ def generar_html_cliente(row):
                 background: #fff4d6;
                 padding: 18px;
                 border-radius: 12px;
-                font-size: 18px;
+                font-size: 16px;
                 font-weight: bold;
             }}
             table {{
                 border-collapse: collapse;
                 width: 100%;
+                margin-bottom: 20px;
             }}
             td {{
                 padding: 9px;
@@ -642,96 +435,614 @@ def generar_html_cliente(row):
         </style>
     </head>
     <body>
-
-        <div class="card">
-            <h1>Ficha Cliente Operativa</h1>
-            <h2>{nombre}</h2>
-            <p><b>Cliente:</b> {row['cliente']} | <b>DPS:</b> {row['dps']} | <b>Prioridad:</b> {row['prioridad']}</p>
-        </div>
-
-        <div class="card">
-            <h2>Resumen Ejecutivo</h2>
-            <div class="kpi-container">
-                <div class="kpi">
-                    <div class="kpi-title">Score oportunidad</div>
-                    <div class="kpi-value">{row['score_oportunidad']:.2f}</div>
-                </div>
-                <div class="kpi">
-                    <div class="kpi-title">HL rechazados</div>
-                    <div class="kpi-value">{row['hl_rechazados']:.2f}</div>
-                </div>
-                <div class="kpi">
-                    <div class="kpi-title">% rechazo</div>
-                    <div class="kpi-value">{row['rech_rate']:.1%}</div>
-                </div>
-                <div class="kpi">
-                    <div class="kpi-title">Frecuencia semanal</div>
-                    <div class="kpi-value">{row['frecuencia_semanal']:.2f}</div>
-                </div>
-            </div>
-        </div>
-
-        <div class="card">
-            <h2>Acción Recomendada</h2>
-            <div class="action">{accion}</div>
-        </div>
-
-        <div class="card">
-            <h2>Información del Cliente</h2>
-            <table>
-                <tr><td>Cliente</td><td>{row['cliente']}</td></tr>
-                <tr><td>Nombre</td><td>{nombre}</td></tr>
-                <tr><td>DPS</td><td>{row['dps']}</td></tr>
-                <tr><td>Madurez</td><td>{row['madurez_cliente']}</td></tr>
-                <tr><td>Ubicación</td><td><a href="{google_maps_url}" target="_blank">Abrir en Google Maps</a></td></tr>
-                <tr><td>Longitud</td><td>{row['x']}</td></tr>
-                <tr><td>Latitud</td><td>{row['y']}</td></tr>
-            </table>
-        </div>
-
-        <div class="card">
-            <h2>Operación</h2>
-            <table>
-                <tr><td>Entregas totales</td><td>{int(row['entregas_totales'])}</td></tr>
-                <tr><td>Entregas OK</td><td>{int(row['entregas_ok'])}</td></tr>
-                <tr><td>Entregas rechazadas</td><td>{int(row['entregas_rech'])}</td></tr>
-                <tr><td>Entregas suspendidas</td><td>{int(row['entregas_sus'])}</td></tr>
-                <tr><td>Entregas FLEX</td><td>{int(row['entregas_flex'])}</td></tr>
-                <tr><td>Entregas FEE</td><td>{int(row['entregas_fee'])}</td></tr>
-            </table>
-        </div>
-
-        <div class="card">
-            <h2>Volumen</h2>
-            <table>
-                <tr><td>HL comprados</td><td>{row['hl_comprados']:.2f}</td></tr>
-                <tr><td>HL rechazados</td><td>{row['hl_rechazados']:.2f}</td></tr>
-                <tr><td>HL entregados estimados</td><td>{row['hl_entregados_estimados']:.2f}</td></tr>
-                <tr><td>Impacto HL</td><td>{row['hl_impacto']:.1%}</td></tr>
-            </table>
-        </div>
-
-        <div class="card">
-            <h2>Rechazos y Ventanas</h2>
-            <table>
-                <tr><td>Motivo principal</td><td>{motivo}</td></tr>
-                <tr><td>Resumen motivos</td><td>{resumen}</td></tr>
-                <tr><td>Ventana recepción</td><td>{ventana_rec}</td></tr>
-                <tr><td>Ventana local cerrado</td><td>{ventana_cerrado}</td></tr>
-                <tr><td>Día entrega</td><td>{row['dia_entrega']}</td></tr>
-                <tr><td>Días flex</td><td>{row['dias_flex']}</td></tr>
-            </table>
-        </div>
-
+        <h1>Fichas Operativas de Clientes</h1>
+        {contenido}
     </body>
     </html>
     """
 
-html_cliente = generar_html_cliente(c)
+
+# =========================================================
+# MAPA
+# =========================================================
+
+def mostrar_mapa_clientes(data, titulo):
+    st.markdown(f"#### {titulo}")
+
+    mapa = data[
+        (data["x"] != 0) &
+        (data["y"] != 0)
+    ].copy()
+
+    if mapa.empty:
+        st.info("No hay coordenadas válidas para mostrar.")
+        return
+
+    mapa["lat"] = mapa["y"]
+    mapa["lon"] = mapa["x"]
+    mapa["label"] = mapa["cliente"] + " - " + mapa["cliente_nombre"]
+
+    try:
+        import pydeck as pdk
+
+        layer_puntos = pdk.Layer(
+            "ScatterplotLayer",
+            data=mapa,
+            get_position="[lon, lat]",
+            get_radius=120,
+            pickable=True,
+            opacity=0.75,
+        )
+
+        layer_texto = pdk.Layer(
+            "TextLayer",
+            data=mapa,
+            get_position="[lon, lat]",
+            get_text="cliente",
+            get_size=14,
+            get_angle=0,
+            get_text_anchor="'middle'",
+            get_alignment_baseline="'bottom'",
+        )
+
+        view_state = pdk.ViewState(
+            latitude=mapa["lat"].mean(),
+            longitude=mapa["lon"].mean(),
+            zoom=10,
+            pitch=0,
+        )
+
+        deck = pdk.Deck(
+            layers=[layer_puntos, layer_texto],
+            initial_view_state=view_state,
+            tooltip={
+                "html": """
+                <b>Cliente:</b> {cliente}<br/>
+                <b>Nombre:</b> {cliente_nombre}<br/>
+                <b>DPS:</b> {dps}<br/>
+                <b>HL Rechazados:</b> {hl_rechazados}<br/>
+                <b>Rechazos:</b> {entregas_rech}<br/>
+                <b>Score:</b> {score_criticidad}
+                """,
+                "style": {"backgroundColor": "white", "color": "black"}
+            }
+        )
+
+        st.pydeck_chart(deck, use_container_width=True)
+
+    except Exception:
+        st.map(
+            mapa.rename(columns={"lat": "latitude", "lon": "longitude"}),
+            latitude="latitude",
+            longitude="longitude"
+        )
+
+    st.dataframe(
+        mapa[
+            [
+                "cliente",
+                "cliente_nombre",
+                "dps",
+                "hl_rechazados",
+                "entregas_rech",
+                "score_criticidad",
+                "accion_recomendada"
+            ]
+        ],
+        use_container_width=True
+    )
+
+
+# =========================================================
+# SIDEBAR FILTROS BASE
+# =========================================================
+
+st.sidebar.title("🔎 Filtros")
+
+dps_sel = st.sidebar.multiselect(
+    "DPS",
+    sorted(df["dps"].unique())
+)
+
+cliente_label_map = {
+    row["cliente"]: f"{row['cliente']} - {row['cliente_nombre']}"
+    for _, row in df[["cliente", "cliente_nombre"]].drop_duplicates().iterrows()
+}
+
+cliente_filtro = st.sidebar.multiselect(
+    "Cliente",
+    sorted(df["cliente"].unique()),
+    format_func=lambda x: cliente_label_map.get(x, x)
+)
+
+motivo_sel = st.sidebar.multiselect(
+    "Motivo rechazo",
+    sorted(df["motivo_rechazo_principal"].unique())
+)
+
+madurez_sel = st.sidebar.multiselect(
+    "Madurez",
+    sorted(df["madurez_cliente"].unique())
+)
+
+df_filtrado = df.copy()
+
+if dps_sel:
+    df_filtrado = df_filtrado[df_filtrado["dps"].isin(dps_sel)]
+
+if cliente_filtro:
+    df_filtrado = df_filtrado[df_filtrado["cliente"].isin(cliente_filtro)]
+
+if motivo_sel:
+    df_filtrado = df_filtrado[df_filtrado["motivo_rechazo_principal"].isin(motivo_sel)]
+
+if madurez_sel:
+    df_filtrado = df_filtrado[df_filtrado["madurez_cliente"].isin(madurez_sel)]
+
+if df_filtrado.empty:
+    st.warning("No hay datos con los filtros seleccionados.")
+    st.stop()
+
+# Score recalculado contra el total del filtro
+df_filtrado = calcular_score_criticidad(df_filtrado)
+df_filtrado["prioridad"] = df_filtrado["score_criticidad"].apply(clasificar_prioridad)
+
+prioridad_sel = st.sidebar.multiselect(
+    "Prioridad",
+    sorted(df_filtrado["prioridad"].unique())
+)
+
+if prioridad_sel:
+    df_filtrado = df_filtrado[df_filtrado["prioridad"].isin(prioridad_sel)]
+
+if df_filtrado.empty:
+    st.warning("No hay datos con los filtros seleccionados.")
+    st.stop()
+
+# Recalcular score después de prioridad, para que el total del filtro final mande
+df_filtrado = calcular_score_criticidad(df_filtrado)
+df_filtrado["prioridad"] = df_filtrado["score_criticidad"].apply(clasificar_prioridad)
+
+# =========================================================
+# HEADER
+# =========================================================
+
+st.title("🚀 Centro de Oportunidades Operativas")
+st.caption(
+    "Herramienta para detectar clientes críticos, recuperar HL y reducir rechazos con foco operativo."
+)
+
+# =========================================================
+# TABLA COMPLETA PRIMERO
+# =========================================================
+
+st.subheader("📋 Tabla Completa Filtrada")
+
+tabla_cols = [
+    "cliente",
+    "cliente_nombre",
+    "dps",
+    "prioridad",
+    "score_criticidad",
+    "entregas_totales",
+    "entregas_rech",
+    "entregas_sus",
+    "entregas_ok",
+    "hl_comprados",
+    "hl_rechazados",
+    "hl_suspendidos",
+    "pct_rechazo",
+    "pct_hl_rechazado",
+    "frecuencia_semanal",
+    "madurez_cliente",
+    "motivo_rechazo_principal",
+    "resumen_motivos_rechazo",
+    "ventana_horaria_recepcion",
+    "ventana_local_cerrado",
+    "dia_entrega",
+    "dias_flex",
+    "tipo_gestion",
+    "accion_recomendada",
+    "x",
+    "y"
+]
+
+tabla_cols = [c for c in tabla_cols if c in df_filtrado.columns]
+
+tabla_vista = (
+    df_filtrado[tabla_cols]
+    .sort_values("score_criticidad", ascending=False)
+    .copy()
+)
+
+st.dataframe(
+    tabla_vista.style.format({
+        "score_criticidad": "{:.1f}",
+        "hl_comprados": "{:.2f}",
+        "hl_rechazados": "{:.2f}",
+        "hl_suspendidos": "{:.2f}",
+        "pct_rechazo": "{:.1%}",
+        "pct_hl_rechazado": "{:.1%}",
+        "frecuencia_semanal": "{:.2f}"
+    }),
+    use_container_width=True,
+    height=520
+)
+
+csv = tabla_vista.to_csv(index=False).encode("utf-8-sig")
 
 st.download_button(
-    "📄 Descargar ficha cliente HTML",
-    html_cliente.encode("utf-8"),
-    f"ficha_cliente_{c['cliente']}.html",
-    "text/html"
+    "📥 Descargar tabla filtrada CSV",
+    csv,
+    "tabla_clientes_filtrada.csv",
+    "text/csv"
 )
+
+# =========================================================
+# RESUMEN EJECUTIVO
+# =========================================================
+
+st.subheader("📊 Resumen Ejecutivo")
+
+clientes_compradores = df_filtrado["cliente"].nunique()
+clientes_rechazadores = df_filtrado.loc[df_filtrado["entregas_rech"] > 0, "cliente"].nunique()
+
+entregas_totales = df_filtrado["entregas_totales"].sum()
+entregas_rech = df_filtrado["entregas_rech"].sum()
+entregas_sus = df_filtrado["entregas_sus"].sum()
+entregas_ok = df_filtrado["entregas_ok"].sum()
+
+hl_comprados = df_filtrado["hl_comprados"].sum()
+hl_rechazados = df_filtrado["hl_rechazados"].sum()
+hl_suspendidos = df_filtrado["hl_suspendidos"].sum()
+
+pct_rechazo_total = entregas_rech / max(entregas_totales, 1)
+pct_sus_total = entregas_sus / max(entregas_totales, 1)
+pct_hl_rech_total = hl_rechazados / max(hl_comprados, 1)
+freq_prom = df_filtrado["frecuencia_semanal"].mean()
+
+r1c1, r1c2, r1c3, r1c4, r1c5, r1c6 = st.columns(6)
+
+r1c1.metric("Clientes compradores", f"{clientes_compradores:,}")
+r1c2.metric("Clientes rechazadores", f"{clientes_rechazadores:,}")
+r1c3.metric("Entregas totales", f"{int(entregas_totales):,}")
+r1c4.metric("Rechazos", f"{int(entregas_rech):,}", f"{pct_rechazo_total:.1%}")
+r1c5.metric("Suspensiones", f"{int(entregas_sus):,}", f"{pct_sus_total:.1%}")
+r1c6.metric("Entregas OK", f"{int(entregas_ok):,}")
+
+r2c1, r2c2, r2c3, r2c4 = st.columns(4)
+
+r2c1.metric("HL comprados", f"{hl_comprados:,.1f}")
+r2c2.metric("HL rechazados", f"{hl_rechazados:,.1f}", f"{pct_hl_rech_total:.1%}")
+r2c3.metric("HL suspendidos est.", f"{hl_suspendidos:,.1f}")
+r2c4.metric("Frecuencia promedio", f"{freq_prom:.2f}")
+
+st.caption(
+    "Nota: HL suspendidos es estimado porque la tabla actual no trae una columna real de HL suspendidos."
+)
+
+# =========================================================
+# TOP 10 CLIENTES A INTERVENIR
+# =========================================================
+
+st.subheader("🎯 Top 10 Clientes a Intervenir")
+
+df_rech = df_filtrado[
+    (df_filtrado["entregas_rech"] > 0) |
+    (df_filtrado["hl_rechazados"] > 0)
+].copy()
+
+if df_rech.empty:
+    st.info("No hay clientes con rechazos en el filtro actual.")
+else:
+    top10 = (
+        df_rech
+        .sort_values("score_criticidad", ascending=False)
+        .head(10)
+        .copy()
+    )
+
+    hl_top10 = top10["hl_rechazados"].sum()
+    rechazos_top10 = top10["entregas_rech"].sum()
+    participacion_hl_top10 = hl_top10 / max(df_rech["hl_rechazados"].sum(), 1)
+    participacion_rech_top10 = rechazos_top10 / max(df_rech["entregas_rech"].sum(), 1)
+
+    t1, t2, t3, t4 = st.columns(4)
+    t1.metric("HL recuperable Top 10", f"{hl_top10:,.1f}")
+    t2.metric("Rechazos Top 10", f"{int(rechazos_top10):,}")
+    t3.metric("% HL rechazo del filtro", f"{participacion_hl_top10:.1%}")
+    t4.metric("% rechazos del filtro", f"{participacion_rech_top10:.1%}")
+
+    top_cols = [
+        "cliente",
+        "cliente_nombre",
+        "dps",
+        "prioridad",
+        "score_criticidad",
+        "entregas_rech",
+        "hl_rechazados",
+        "pct_rechazo",
+        "pct_hl_rechazado",
+        "participacion_rechazos",
+        "participacion_hl_rechazado",
+        "frecuencia_semanal",
+        "motivo_rechazo_principal",
+        "tipo_gestion",
+        "accion_recomendada"
+    ]
+
+    st.dataframe(
+        top10[top_cols].style.format({
+            "score_criticidad": "{:.1f}",
+            "hl_rechazados": "{:.2f}",
+            "pct_rechazo": "{:.1%}",
+            "pct_hl_rechazado": "{:.1%}",
+            "participacion_rechazos": "{:.1%}",
+            "participacion_hl_rechazado": "{:.1%}",
+            "frecuencia_semanal": "{:.2f}"
+        }),
+        use_container_width=True,
+        height=360
+    )
+
+    # =========================================================
+    # PLAN DE ACCIÓN
+    # =========================================================
+
+    st.subheader("🧠 Plan de Acción para Top 10")
+
+    for _, row in top10.iterrows():
+        st.markdown(
+            f"""
+            **{row['prioridad']} | {row['cliente']} - {row['cliente_nombre']} | DPS {row['dps']}**  
+            Score: **{row['score_criticidad']:.1f}** | Rechazos: **{int(row['entregas_rech'])}** | HL rechazados: **{row['hl_rechazados']:.2f}**  
+            👉 {row['accion_recomendada']}
+            """
+        )
+
+    # =========================================================
+    # MAPA TOP 10
+    # =========================================================
+
+    st.subheader("🗺️ Ubicación Top 10 Clientes")
+
+    mostrar_mapa_clientes(top10, "Mapa de clientes priorizados")
+
+# =========================================================
+# ANÁLISIS VISUAL SOLO RECHAZOS
+# =========================================================
+
+st.subheader("📈 Análisis Visual de Rechazos")
+
+df_rech = df_filtrado[
+    (df_filtrado["entregas_rech"] > 0) |
+    (df_filtrado["hl_rechazados"] > 0)
+].copy()
+
+if df_rech.empty:
+    st.info("No hay datos de rechazo para graficar.")
+else:
+    g1, g2 = st.columns(2)
+
+    with g1:
+        st.markdown("#### Top 20 HL Rechazados")
+        pareto_hl = (
+            df_rech
+            .sort_values("hl_rechazados", ascending=False)
+            .head(20)
+            .copy()
+        )
+        pareto_hl["cliente_label"] = pareto_hl["cliente"] + " - " + pareto_hl["cliente_nombre"]
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.barh(pareto_hl["cliente_label"], pareto_hl["hl_rechazados"])
+        ax.invert_yaxis()
+        ax.set_xlabel("HL Rechazados")
+        ax.set_ylabel("Cliente")
+        st.pyplot(fig)
+
+    with g2:
+        st.markdown("#### Top 20 Cantidad de Rechazos")
+        pareto_rech = (
+            df_rech
+            .sort_values("entregas_rech", ascending=False)
+            .head(20)
+            .copy()
+        )
+        pareto_rech["cliente_label"] = pareto_rech["cliente"] + " - " + pareto_rech["cliente_nombre"]
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.barh(pareto_rech["cliente_label"], pareto_rech["entregas_rech"])
+        ax.invert_yaxis()
+        ax.set_xlabel("Cantidad de rechazos")
+        ax.set_ylabel("Cliente")
+        st.pyplot(fig)
+
+    g3, g4 = st.columns(2)
+
+    with g3:
+        st.markdown("#### Rechazos por Motivo")
+        motivos = (
+            df_rech
+            .groupby("motivo_rechazo_principal", as_index=False)
+            .agg(
+                rechazos=("entregas_rech", "sum"),
+                hl_rechazados=("hl_rechazados", "sum"),
+                clientes=("cliente", "nunique")
+            )
+            .sort_values("rechazos", ascending=False)
+            .head(10)
+        )
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.barh(motivos["motivo_rechazo_principal"], motivos["rechazos"])
+        ax.invert_yaxis()
+        ax.set_xlabel("Cantidad de rechazos")
+        ax.set_ylabel("Motivo")
+        st.pyplot(fig)
+
+    with g4:
+        st.markdown("#### HL Rechazados por Motivo")
+        motivos_hl = motivos.sort_values("hl_rechazados", ascending=False)
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.barh(motivos_hl["motivo_rechazo_principal"], motivos_hl["hl_rechazados"])
+        ax.invert_yaxis()
+        ax.set_xlabel("HL rechazados")
+        ax.set_ylabel("Motivo")
+        st.pyplot(fig)
+
+    g5, g6 = st.columns(2)
+
+    with g5:
+        st.markdown("#### Rechazos por DPS")
+        dps_rech = (
+            df_rech
+            .groupby("dps", as_index=False)
+            .agg(
+                rechazos=("entregas_rech", "sum"),
+                hl_rechazados=("hl_rechazados", "sum")
+            )
+            .sort_values("rechazos", ascending=False)
+        )
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.bar(dps_rech["dps"], dps_rech["rechazos"])
+        ax.set_xlabel("DPS")
+        ax.set_ylabel("Cantidad de rechazos")
+        st.pyplot(fig)
+
+    with g6:
+        st.markdown("#### Cantidad de Rechazos vs HL Rechazados")
+        fig, ax = plt.subplots(figsize=(10, 5))
+        size = (df_rech["score_criticidad"].clip(lower=5) * 5)
+        ax.scatter(
+            df_rech["entregas_rech"],
+            df_rech["hl_rechazados"],
+            s=size,
+            alpha=0.6
+        )
+        ax.set_xlabel("Cantidad de rechazos")
+        ax.set_ylabel("HL rechazados")
+        st.pyplot(fig)
+
+# =========================================================
+# FICHA CLIENTE MULTI-SELECCIÓN
+# =========================================================
+
+st.subheader("🧾 Ficha Cliente")
+
+clientes_codigos = sorted(df_filtrado["cliente"].unique())
+
+default_clientes = []
+if "top10" in locals() and not top10.empty:
+    default_clientes = top10["cliente"].head(1).tolist()
+
+cliente_sel = st.multiselect(
+    "Selecciona código(s) de cliente",
+    clientes_codigos,
+    default=default_clientes,
+    format_func=lambda x: cliente_label_map.get(x, x)
+)
+
+if cliente_sel:
+    fichas_df = (
+        df_filtrado[df_filtrado["cliente"].isin(cliente_sel)]
+        .sort_values("score_criticidad", ascending=False)
+        .copy()
+    )
+
+    mostrar_mapa_clientes(fichas_df, "Mapa clientes seleccionados")
+
+    html_fichas = generar_html_fichas(fichas_df)
+
+    st.download_button(
+        "📄 Descargar fichas seleccionadas HTML",
+        html_fichas.encode("utf-8"),
+        "fichas_clientes_seleccionados.html",
+        "text/html"
+    )
+
+    for _, c in fichas_df.iterrows():
+        with st.expander(f"{c['cliente']} - {c['cliente_nombre']}", expanded=True):
+
+            f1, f2, f3, f4, f5 = st.columns(5)
+
+            f1.metric("Prioridad", c["prioridad"])
+            f2.metric("Score", f"{c['score_criticidad']:.1f}")
+            f3.metric("Rechazos", int(c["entregas_rech"]))
+            f4.metric("HL Rechazados", f"{c['hl_rechazados']:.2f}")
+            f5.metric("% Rechazo", f"{c['pct_rechazo']:.1%}")
+
+            primera_fecha = (
+                c["primera_fecha_entrega"].date()
+                if pd.notnull(c["primera_fecha_entrega"])
+                else "SIN DATO"
+            )
+
+            st.markdown(f"""
+            ### 📌 Datos Generales
+
+            **Código cliente:** {c['cliente']}  
+            **Nombre:** {c['cliente_nombre']}  
+            **DPS:** {c['dps']}  
+            **Madurez:** {c['madurez_cliente']}  
+            **Primera fecha entrega:** {primera_fecha}
+
+            ---
+
+            ### 📦 Volumen
+
+            - **HL comprados:** {c['hl_comprados']:.2f}
+            - **HL rechazados:** {c['hl_rechazados']:.2f}
+            - **HL suspendidos estimados:** {c['hl_suspendidos']:.2f}
+            - **HL entregados estimados:** {c['hl_entregados_estimados']:.2f}
+            - **% HL rechazado:** {c['pct_hl_rechazado']:.1%}
+
+            ---
+
+            ### 🚚 Operación
+
+            - **Entregas totales:** {int(c['entregas_totales'])}
+            - **Entregas rechazadas:** {int(c['entregas_rech'])}
+            - **Entregas suspendidas:** {int(c['entregas_sus'])}
+            - **Entregas OK:** {int(c['entregas_ok'])}
+            - **Frecuencia semanal:** {c['frecuencia_semanal']:.2f}
+            - **Semanas activas:** {c['semanas_activas']:.2f}
+            - **Días activos:** {int(c['dias_activos'])}
+
+            ---
+
+            ### 🚨 Rechazos
+
+            - **Motivo principal:** {c['motivo_rechazo_principal']}
+            - **Código motivo:** {c['codigo_motivo_principal']}
+            - **Resumen motivos:** {c['resumen_motivos_rechazo']}
+
+            ---
+
+            ### ⏰ Ventanas
+
+            - **Ventana horaria recepción:** {c['ventana_horaria_recepcion']}
+            - **Ventana local cerrado:** {c['ventana_local_cerrado']}
+            - **Día entrega:** {c['dia_entrega']}
+            - **Días flex:** {c['dias_flex']}
+
+            ---
+
+            ### ✅ Acción Recomendada
+
+            {c['accion_recomendada']}
+            """)
+
+            html_individual = generar_html_fichas(pd.DataFrame([c]))
+
+            st.download_button(
+                "📄 Descargar HTML de este cliente",
+                html_individual.encode("utf-8"),
+                f"ficha_cliente_{c['cliente']}.html",
+                "text/html",
+                key=f"html_{c['cliente']}"
+            )
+else:
+    st.info("Selecciona uno o más códigos de cliente para ver la ficha.")
