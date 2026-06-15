@@ -317,245 +317,238 @@ def clasificar_prioridad(score):
         return "🟢 BAJA"
 
 # =========================================================
-# GLOSARIO
+# NAVEGACIÓN
+# =========================================================
+
+if "vista_actual" not in st.session_state:
+    st.session_state["vista_actual"] = "dashboard"
+
+
+def ir_a_informacion():
+    st.session_state["vista_actual"] = "informacion"
+
+
+def volver_al_dashboard():
+    st.session_state["vista_actual"] = "dashboard"
+
+# =========================================================
+# GLOSARIO COMPACTO
 # =========================================================
 
 def mostrar_glosario():
-    st.title("📘 Glosario de Medidas y Reglas")
-    st.caption(
-        "Guía simple para entender cómo se calculan los indicadores del dashboard."
-    )
+    col_titulo, col_boton = st.columns([5, 1])
+
+    with col_titulo:
+        st.title("📘 Información del Dashboard")
+        st.caption(
+            "Glosario compacto para entender qué significa cada métrica y cómo se calcula."
+        )
+
+    with col_boton:
+        st.write("")
+        st.button(
+            "⬅️ Volver al tablero",
+            on_click=volver_al_dashboard,
+            use_container_width=True
+        )
+
+    st.divider()
+
+    with st.expander("📊 Métricas principales", expanded=True):
+        st.markdown("""
+        | Métrica | Qué significa | Regla |
+        |---|---|---|
+        | **Clientes compradores** | Clientes únicos dentro del filtro actual. | `cliente.nunique()` |
+        | **Clientes rechazadores** | Clientes con al menos un rechazo. | `entregas_rech > 0` |
+        | **Clientes suspendidos** | Clientes con al menos una suspensión. | `entregas_sus > 0` |
+        | **Entregas totales** | Total de entregas del filtro. | `sum(entregas_totales)` |
+        | **Rechazos** | Total de entregas rechazadas. | `sum(entregas_rech)` |
+        | **Suspensiones** | Total de entregas suspendidas. | `sum(entregas_sus)` |
+        | **Entregas OK** | Entregas completadas correctamente. | `sum(entregas_ok)` |
+        | **HL comprados** | Volumen comprado por los clientes. | `sum(hl_comprados)` |
+        | **HL rechazados** | Volumen perdido por rechazo. | `sum(hl_rechazados)` |
+        """)
+
+    with st.expander("📦 Frecuencia, madurez y ventanas", expanded=False):
+        st.markdown("""
+        | Medida | Cómo se calcula / interpreta |
+        |---|---|
+        | **% rechazo** | `entregas_rech / entregas_totales` |
+        | **% suspensión** | `entregas_sus / entregas_totales` |
+        | **% HL rechazado** | `hl_rechazados / hl_comprados` |
+        | **Frecuencia semanal** | `entregas_totales / semanas_activas` |
+        | **Madurez BAJA** | Cliente con menos de 4 semanas activas. |
+        | **Madurez MEDIA** | Cliente con 4 a menos de 8 semanas activas. |
+        | **Madurez ALTA** | Cliente con 8 semanas activas o más. |
+        | **Ventana horaria de recepción** | Horario donde el cliente normalmente recibe mejor. |
+        | **Ventana de rechazo por local cerrado** | Horario donde se concentran más rechazos con motivo `LOCAL CERRADO`. |
+        """)
+
+        st.info(
+            "Ejemplo operativo: si la ventana de recepción es NOCHE, pero la ventana de rechazo por local cerrado es TARDE, "
+            "la acción sugerida será validar o mover la entrega hacia la noche."
+        )
+
+    with st.expander("🧮 Score de criticidad: explicación técnica exacta", expanded=True):
+        st.markdown("""
+        El **score de criticidad** es un puntaje de 0 a 100 que ordena los clientes más importantes a revisar.
+
+        El objetivo es evitar que un cliente con **1 entrega y 100% rechazo** salga arriba solo por tener un porcentaje alto.  
+        Por eso el score combina **volumen**, **cantidad**, **porcentaje** y **representatividad dentro del filtro actual**.
+
+        ### 1. Totales del filtro actual
+
+        Cada vez que filtras por DPS, cliente, motivo o madurez, el score se recalcula usando solo ese universo filtrado.
+
+        ```python
+        total_rechazos_filtro = sum(entregas_rech)
+        total_hl_rech_filtro = sum(hl_rechazados)
+        total_entregas_filtro = sum(entregas_totales)
+        total_hl_comprados_filtro = sum(hl_comprados)
+        ```
+
+        ### 2. Participaciones del cliente dentro del filtro
+
+        Para cada cliente se calcula qué tanto representa dentro del total filtrado:
+
+        ```python
+        participacion_rechazos =
+            entregas_rech_cliente / total_rechazos_filtro
+
+        participacion_hl_rechazado =
+            hl_rechazados_cliente / total_hl_rech_filtro
+
+        participacion_entregas =
+            entregas_totales_cliente / total_entregas_filtro
+
+        participacion_hl_comprados =
+            hl_comprados_cliente / total_hl_comprados_filtro
+        ```
+
+        **Interpretación:**  
+        Si un cliente tiene muchos rechazos o mucho HL rechazado frente al total del filtro, gana peso.
+
+        ### 3. Porcentajes base del cliente
+
+        ```python
+        pct_rechazo =
+            entregas_rech_cliente / entregas_totales_cliente
+
+        pct_hl_rechazado =
+            hl_rechazados_cliente / hl_comprados_cliente
+        ```
+
+        Estos porcentajes muestran qué tan grave es el problema dentro del propio cliente.
 
-    st.markdown("""
-    ## 1. Clientes compradores
+        ### 4. Ajuste de representatividad
 
-    Es la cantidad de clientes únicos que aparecen en la base filtrada.
+        El porcentaje solo no alcanza, porque un cliente con 1 entrega y 1 rechazo tendría 100%.  
+        Para evitar eso, el porcentaje se multiplica por la raíz cuadrada de su participación.
 
-    **Ejemplo:**  
-    Si un cliente tiene varias entregas, se cuenta una sola vez.
+        ```python
+        pct_rechazo_representativo =
+            pct_rechazo * sqrt(participacion_entregas)
 
-    ---
+        pct_hl_rechazado_representativo =
+            pct_hl_rechazado * sqrt(participacion_hl_comprados)
+        ```
 
-    ## 2. Clientes rechazadores
+        **Por qué usamos raíz cuadrada:**  
+        Sirve para dar peso a clientes representativos sin castigar demasiado a clientes medianos.  
+        Baja el efecto de casos muy pequeños, pero no elimina completamente su importancia.
 
-    Son los clientes que tienen al menos una entrega rechazada.
+        ### 5. Normalización de componentes
 
-    **Regla:**  
-    Cliente rechazador = cliente con `entregas_rech > 0`.
+        Cada componente se lleva a una escala de 0 a 1 comparándolo contra el cliente más alto del filtro.
 
-    ---
+        ```python
+        comp_cantidad_rechazos =
+            participacion_rechazos / max(participacion_rechazos)
 
-    ## 3. Clientes suspendidos
+        comp_hl_rechazado =
+            participacion_hl_rechazado / max(participacion_hl_rechazado)
 
-    Son los clientes que tienen al menos una entrega suspendida.
+        comp_pct_rechazo =
+            pct_rechazo_representativo / max(pct_rechazo_representativo)
 
-    **Regla:**  
-    Cliente suspendido = cliente con `entregas_sus > 0`.
+        comp_pct_hl =
+            pct_hl_rechazado_representativo / max(pct_hl_rechazado_representativo)
+        ```
 
-    ---
+        **Interpretación:**  
+        El cliente más alto de cada componente queda con valor 1.  
+        Los demás quedan proporcionales contra ese máximo.
 
-    ## 4. Entregas totales
+        ### 6. Fórmula final del score
 
-    Es la cantidad total de entregas registradas para el cliente dentro del periodo analizado.
+        ```python
+        score_criticidad = 100 * (
+            comp_cantidad_rechazos * 0.30 +
+            comp_hl_rechazado * 0.35 +
+            comp_pct_rechazo * 0.20 +
+            comp_pct_hl * 0.15
+        )
+        ```
 
-    ---
+        ### 7. Pesos usados
 
-    ## 5. Rechazos
+        | Componente | Peso | Razón operativa |
+        |---|---:|---|
+        | **HL rechazados** | 35% | Es el impacto directo en volumen perdido. |
+        | **Cantidad de rechazos** | 30% | Identifica recurrencia operativa. |
+        | **% rechazo representativo** | 20% | Mide gravedad del rechazo, pero ajustada por tamaño del cliente. |
+        | **% HL rechazado representativo** | 15% | Mide gravedad del volumen rechazado, ajustada por volumen comprado. |
 
-    Es la cantidad de entregas que terminaron como rechazo.
+        ### 8. Lectura del score
 
-    **Regla:**  
-    Se usa el campo `entregas_rech`.
+        | Score | Prioridad |
+        |---:|---|
+        | `>= 75` | 🔥 CRÍTICA |
+        | `>= 50 y < 75` | 🟠 ALTA |
+        | `>= 25 y < 50` | 🟡 MEDIA |
+        | `< 25` | 🟢 BAJA |
 
-    ---
+        ### 9. Ejemplo simple
 
-    ## 6. Suspensiones
+        Un cliente puede tener 100% de rechazo, pero si solo tiene 1 entrega y poco HL, su participación en el filtro será baja.  
+        Entonces su score no subirá tanto.
 
-    Es la cantidad de entregas que quedaron suspendidas.
+        En cambio, un cliente con muchos rechazos, varios HL rechazados y porcentajes altos tendrá un score mayor porque combina:
 
-    **Regla:**  
-    Se usa el campo `entregas_sus`.
+        - Relevancia en cantidad.
+        - Relevancia en volumen.
+        - Gravedad porcentual.
+        - Representatividad dentro del filtro.
+        """)
 
-    ---
+    with st.expander("✅ Sugerencias operativas", expanded=False):
+        st.markdown("""
+        | Motivo principal | Sugerencia generada |
+        |---|---|
+        | **LOCAL CERRADO** | Revisar ventanas, contactar cliente y ajustar horario. |
+        | **SIN DINERO** | Contactar antes del despacho para confirmar disponibilidad de pago. |
+        | **NO RECIBE / RECHAZA** | Llamada preventiva antes de programar entrega. |
+        | **DIRECCIÓN / NO UBICADO** | Validar ubicación, referencias y geolocalización. |
+        | **MAL PEDIDO** | Revisar pedido con ventas antes del despacho. |
+        | **STOCK** | Validar disponibilidad y causa del faltante. |
+        | **Otros motivos** | Revisar historial operativo y definir acción con reparto/ventas. |
+        """)
 
-    ## 7. Entregas OK
+    with st.expander("🔁 Top 10 y avance operativo", expanded=False):
+        st.markdown("""
+        El tablero muestra los **10 clientes más críticos** según el score.
 
-    Es la cantidad de entregas que fueron completadas correctamente.
+        Si el equipo ya gestionó esos 10 clientes, puede marcar:
 
-    **Regla:**  
-    Se usa el campo `entregas_ok`.
+        **✅ Ya atendí estos 10 clientes, mostrar los siguientes 10**
 
-    ---
+        Luego puede avanzar en bloques:
 
-    ## 8. HL comprados
-
-    Es el volumen total comprado por el cliente en hectolitros.
-
-    **Regla:**  
-    Se usa el campo `hl_comprados`.
-
-    ---
-
-    ## 9. HL rechazados
-
-    Es el volumen que no se pudo entregar porque terminó en rechazo.
-
-    **Regla:**  
-    Se usa el campo `hl_rechazados`.
-
-    ---
-
-    ## 10. % rechazo
-
-    Mide qué parte de las entregas del cliente terminó rechazada.
-
-    **Regla:**  
-    `% rechazo = entregas rechazadas / entregas totales`
-
-    **Ejemplo:**  
-    Si un cliente tuvo 10 entregas y rechazó 2, su % rechazo es 20%.
-
-    ---
-
-    ## 11. % HL rechazado
-
-    Mide qué parte del volumen comprado terminó rechazado.
-
-    **Regla:**  
-    `% HL rechazado = HL rechazados / HL comprados`
-
-    **Ejemplo:**  
-    Si un cliente compró 100 HL y rechazó 15 HL, su % HL rechazado es 15%.
-
-    ---
-
-    ## 12. Frecuencia semanal
-
-    Indica cuántas veces por semana, en promedio, se entrega al cliente.
-
-    **Regla:**  
-    `frecuencia semanal = entregas totales / semanas activas`
-
-    **Uso operativo:**  
-    Un cliente con alta frecuencia y muchos rechazos debe revisarse rápido porque el problema se repite seguido.
-
-    ---
-
-    ## 13. Madurez del cliente
-
-    La madurez ayuda a entender si el cliente tiene poco o mucho historial.
-
-    **Regla usada:**
-
-    - **BAJA:** menos de 4 semanas activas
-    - **MEDIA:** entre 4 y menos de 8 semanas activas
-    - **ALTA:** 8 semanas activas o más
-
-    **Interpretación:**  
-    Un cliente con madurez baja puede tener poca historia todavía.  
-    Un cliente con madurez alta tiene suficiente historial para tomar mejores decisiones.
-
-    ---
-
-    ## 14. Ventana horaria de recepción
-
-    Es la ventana donde el cliente normalmente logra recibir mejor.
-
-    **Ejemplo:**  
-    `MAÑANA`, `TARDE` o `NOCHE`.
-
-    **Uso operativo:**  
-    Sirve para saber en qué horario conviene intentar entregar.
-
-    ---
-
-    ## 15. Ventana de rechazo por local cerrado
-
-    Esta medida muestra en qué ventana horaria ocurren más rechazos por motivo **LOCAL CERRADO**.
-
-    **Ejemplo:**  
-    Si dice `TARDE (12:00-18:00)`, significa que los rechazos por local cerrado se concentran más en la tarde.
-
-    **Uso operativo:**  
-    Comparar esta ventana contra la ventana horaria de recepción.  
-    Si el cliente recibe bien de noche pero rechaza por local cerrado en la tarde, la acción sugerida será mover o validar la entrega hacia la noche.
-
-    ---
-
-    ## 16. Score de criticidad
-
-    Es el puntaje que usamos para ordenar a los clientes más importantes a revisar.
-
-    El objetivo es evitar que un cliente con una sola entrega y 100% rechazo aparezca arriba si no representa mucho volumen ni muchos rechazos.
-
-    El score combina 4 cosas:
-
-    1. **Cantidad de rechazos:** clientes que rechazan muchas veces.
-    2. **HL rechazados:** clientes donde se pierde más volumen.
-    3. **% rechazo:** qué tan grave es el rechazo dentro de sus entregas.
-    4. **% HL rechazado:** qué tan grave es el rechazo dentro de su volumen comprado.
-
-    Además, el cálculo se compara contra el total del filtro seleccionado.
-
-    **Ejemplo:**  
-    Si filtras un DPS, el score se recalcula solo contra los clientes de ese DPS.
-
-    ---
-
-    ## 17. Prioridad
-
-    La prioridad se asigna usando el score de criticidad.
-
-    **Regla:**
-
-    - **🔥 CRÍTICA:** score mayor o igual a 75
-    - **🟠 ALTA:** score entre 50 y 74.9
-    - **🟡 MEDIA:** score entre 25 y 49.9
-    - **🟢 BAJA:** score menor a 25
-
-    ---
-
-    ## 18. Sugerencias operativas
-
-    Las sugerencias se generan según el motivo principal de rechazo.
-
-    **Reglas principales:**
-
-    - **LOCAL CERRADO:** revisar ventanas de entrega, contactar al cliente y ajustar horario.
-    - **SIN DINERO:** contactar antes del despacho para confirmar disponibilidad de pago.
-    - **NO RECIBE / RECHAZA:** hacer llamada preventiva antes de programar entrega.
-    - **DIRECCIÓN / NO UBICADO:** validar ubicación y referencias.
-    - **MAL PEDIDO:** revisar pedido con ventas antes de despacho.
-    - **STOCK:** validar disponibilidad y causa del faltante.
-    - **Otros motivos:** revisar historial operativo y definir acción con reparto/ventas.
-
-    ---
-
-    ## 19. Top 10 clientes a intervenir
-
-    Es el ranking de los clientes más críticos según el score.
-
-    **Uso operativo:**  
-    Permite enfocar la gestión en pocos clientes que pueden ayudar a recuperar más HL y reducir rechazos.
-
-    ---
-
-    ## 20. Ya atendí estos 10 clientes
-
-    Esta opción permite avanzar al siguiente grupo de clientes críticos.
-
-    **Ejemplo:**
-
-    - Primero ves clientes 1 al 10.
-    - Si ya los atendiste, marcas la opción.
-    - El dashboard muestra clientes 11 al 20.
-    - Puedes aumentar la cantidad atendida para ver 21 al 30, 31 al 40, etc.
-    """)
-
-    st.info(
-        "Este glosario está pensado para equipos operativos. "
-        "No busca explicar la fórmula técnica completa, sino cómo interpretar y usar cada medida."
-    )
+        - Clientes 1 al 10.
+        - Clientes 11 al 20.
+        - Clientes 21 al 30.
+        - Y así sucesivamente.
+        """)
 
 # =========================================================
 # HTML EXPORT
@@ -850,22 +843,36 @@ def mostrar_mapa_clientes(data, titulo):
     )
 
 # =========================================================
-# SIDEBAR NAVEGACIÓN Y FILTROS
+# HEADER CON BOTÓN INFORMACIÓN
 # =========================================================
 
-st.sidebar.title("🧭 Navegación")
+header_left, header_right = st.columns([5, 1])
 
-vista = st.sidebar.radio(
-    "Selecciona una vista",
-    [
-        "Dashboard operativo",
-        "Glosario de medidas"
-    ]
-)
+with header_left:
+    st.title("🚀 Centro de Oportunidades Operativas")
 
-if vista == "Glosario de medidas":
+with header_right:
+    st.write("")
+    st.button(
+        "ℹ️ Información",
+        on_click=ir_a_informacion,
+        use_container_width=True
+    )
+
+if st.session_state["vista_actual"] == "informacion":
     mostrar_glosario()
     st.stop()
+
+ultima_actualizacion = get_last_github_update()
+
+st.caption(
+    f"Herramienta para detectar clientes críticos, recuperar HL y reducir rechazos con foco operativo. "
+    f"Última actualización CSV GitHub: {ultima_actualizacion} hora Bolivia."
+)
+
+# =========================================================
+# SIDEBAR FILTROS
+# =========================================================
 
 st.sidebar.title("🔎 Filtros")
 
@@ -927,19 +934,6 @@ if prioridad_sel:
 if df_filtrado.empty:
     st.warning("No hay datos con los filtros seleccionados.")
     st.stop()
-
-# =========================================================
-# HEADER
-# =========================================================
-
-st.title("🚀 Centro de Oportunidades Operativas")
-
-ultima_actualizacion = get_last_github_update()
-
-st.caption(
-    f"Herramienta para detectar clientes críticos, recuperar HL y reducir rechazos con foco operativo. "
-    f"Última actualización CSV GitHub: {ultima_actualizacion} hora Bolivia."
-)
 
 # =========================================================
 # TABLA COMPLETA PRIMERO
