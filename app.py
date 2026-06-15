@@ -4,7 +4,8 @@ import requests
 from io import StringIO
 import matplotlib.pyplot as plt
 import html
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # =========================================================
 # CONFIG
@@ -19,30 +20,6 @@ CSV_URL = "https://raw.githubusercontent.com/PabloJ91011/MAPAS/main/otif_h3.csv"
 GITHUB_API_COMMITS_URL = "https://api.github.com/repos/PabloJ91011/MAPAS/commits"
 
 # =========================================================
-# ESTADO DE NAVEGACIÓN
-# =========================================================
-
-if "vista_actual" not in st.session_state:
-    st.session_state["vista_actual"] = "dashboard"
-
-
-def safe_rerun():
-    try:
-        st.rerun()
-    except AttributeError:
-        st.experimental_rerun()
-
-
-def ir_a_informacion():
-    st.session_state["vista_actual"] = "informacion"
-    safe_rerun()
-
-
-def volver_al_dashboard():
-    st.session_state["vista_actual"] = "dashboard"
-    safe_rerun()
-
-# =========================================================
 # CARGA DATOS
 # =========================================================
 
@@ -54,7 +31,7 @@ def load_data():
 
 
 @st.cache_data(ttl=600)
-def get_last_update():
+def get_last_github_update():
     try:
         params = {
             "path": "otif_h3.csv",
@@ -84,15 +61,15 @@ def get_last_update():
             fecha_utc.replace("Z", "+00:00")
         )
 
-        # Bolivia = UTC -4
         dt_local = dt_utc.astimezone(
-            timezone(timedelta(hours=-4))
+            ZoneInfo("America/La_Paz")
         )
 
         return dt_local.strftime("%d/%m/%Y %H:%M:%S")
 
     except Exception:
         return "No disponible"
+
 
 df = load_data()
 
@@ -339,6 +316,20 @@ def clasificar_prioridad(score):
     else:
         return "🟢 BAJA"
 
+# =========================================================
+# NAVEGACIÓN
+# =========================================================
+
+if "vista_actual" not in st.session_state:
+    st.session_state["vista_actual"] = "dashboard"
+
+
+def ir_a_informacion():
+    st.session_state["vista_actual"] = "informacion"
+
+
+def volver_al_dashboard():
+    st.session_state["vista_actual"] = "dashboard"
 
 # =========================================================
 # GLOSARIO COMPACTO
@@ -348,15 +339,18 @@ def mostrar_glosario():
     col_titulo, col_boton = st.columns([5, 1])
 
     with col_titulo:
-        st.title("📘 Glosario de Medidas")
+        st.title("📘 Información del Dashboard")
         st.caption(
-            "Información para entender cómo se calculan las métricas, prioridades y sugerencias del dashboard."
+            "Glosario compacto para entender qué significa cada métrica y cómo se calcula."
         )
 
     with col_boton:
         st.write("")
-        if st.button("⬅️ Volver al dashboard", use_container_width=True):
-            volver_al_dashboard()
+        st.button(
+            "⬅️ Volver al tablero",
+            on_click=volver_al_dashboard,
+            use_container_width=True
+        )
 
     st.divider()
 
@@ -392,41 +386,19 @@ def mostrar_glosario():
 
         st.info(
             "Ejemplo operativo: si la ventana de recepción es NOCHE, pero la ventana de rechazo por local cerrado es TARDE, "
-            "la recomendación será validar si conviene mover la entrega hacia la noche."
+            "la acción sugerida será validar o mover la entrega hacia la noche."
         )
 
-    with st.expander("🧮 16. Score de criticidad: cómo se arma exactamente", expanded=True):
+    with st.expander("🧮 Score de criticidad: explicación técnica exacta", expanded=True):
         st.markdown("""
-        El **score de criticidad** es el puntaje que usa el dashboard para ordenar a los clientes más importantes a revisar.
+        El **score de criticidad** es un puntaje de 0 a 100 que ordena los clientes más importantes a revisar.
 
-        La idea principal es que el ranking no dependa solo de un porcentaje.  
-        Por ejemplo, un cliente con **1 entrega y 1 rechazo** tiene **100% de rechazo**, pero puede no ser tan importante si representa poco volumen y poca cantidad de rechazos dentro del universo filtrado.
+        El objetivo es evitar que un cliente con **1 entrega y 100% rechazo** salga arriba solo por tener un porcentaje alto.  
+        Por eso el score combina **volumen**, **cantidad**, **porcentaje** y **representatividad dentro del filtro actual**.
 
-        Por eso el score mezcla cuatro dimensiones:
+        ### 1. Totales del filtro actual
 
-        1. **Cantidad de rechazos**  
-           Da peso a clientes que rechazan muchas veces.
-
-        2. **HL rechazados**  
-           Da peso a clientes donde se pierde más volumen.
-
-        3. **% rechazo representativo**  
-           Mide qué tan grave es el rechazo dentro de las entregas del cliente, pero ajustado por el tamaño del cliente dentro del filtro.
-
-        4. **% HL rechazado representativo**  
-           Mide qué tan grave es el rechazo dentro del volumen comprado por el cliente, también ajustado por su peso en el filtro.
-
-        ---
-
-        ### Paso 1: se toma el universo filtrado
-
-        El score se recalcula cada vez que usas filtros.
-
-        Si filtras por DPS 7, el score se calcula solo con los clientes del DPS 7.  
-        Si filtras por motivo `LOCAL CERRADO`, el score se calcula solo contra clientes con ese motivo.  
-        Si no filtras nada, se calcula contra toda la base.
-
-        El primer paso es calcular los totales del filtro actual:
+        Cada vez que filtras por DPS, cliente, motivo o madurez, el score se recalcula usando solo ese universo filtrado.
 
         ```python
         total_rechazos_filtro = sum(entregas_rech)
@@ -435,231 +407,79 @@ def mostrar_glosario():
         total_hl_comprados_filtro = sum(hl_comprados)
         ```
 
-        Estos totales funcionan como la base de comparación.
+        ### 2. Participaciones del cliente dentro del filtro
 
-        ---
-
-        ### Paso 2: se calcula la participación de cada cliente
-
-        Para cada cliente, se calcula cuánto representa dentro del filtro.
-
-        #### Participación en rechazos
+        Para cada cliente se calcula qué tanto representa dentro del total filtrado:
 
         ```python
         participacion_rechazos =
             entregas_rech_cliente / total_rechazos_filtro
-        ```
 
-        Esto responde:
-
-        > De todos los rechazos del filtro, ¿qué porcentaje viene de este cliente?
-
-        Ejemplo:  
-        Si en el filtro hay 100 rechazos y el cliente tiene 10 rechazos:
-
-        ```text
-        participacion_rechazos = 10 / 100 = 10%
-        ```
-
-        #### Participación en HL rechazado
-
-        ```python
         participacion_hl_rechazado =
             hl_rechazados_cliente / total_hl_rech_filtro
-        ```
 
-        Esto responde:
-
-        > De todo el HL rechazado del filtro, ¿qué porcentaje viene de este cliente?
-
-        Ejemplo:  
-        Si en el filtro hay 500 HL rechazados y el cliente tiene 50 HL rechazados:
-
-        ```text
-        participacion_hl_rechazado = 50 / 500 = 10%
-        ```
-
-        #### Participación en entregas
-
-        ```python
         participacion_entregas =
             entregas_totales_cliente / total_entregas_filtro
-        ```
 
-        Esto mide qué tan representativo es el cliente en cantidad de entregas.
-
-        #### Participación en HL comprado
-
-        ```python
         participacion_hl_comprados =
             hl_comprados_cliente / total_hl_comprados_filtro
         ```
 
-        Esto mide qué tan representativo es el cliente en volumen comprado.
+        **Interpretación:**  
+        Si un cliente tiene muchos rechazos o mucho HL rechazado frente al total del filtro, gana peso.
 
-        ---
-
-        ### Paso 3: se calculan los porcentajes propios del cliente
-
-        #### % rechazo
+        ### 3. Porcentajes base del cliente
 
         ```python
         pct_rechazo =
             entregas_rech_cliente / entregas_totales_cliente
-        ```
 
-        Esto mide qué tan problemático es el cliente en cantidad de entregas.
-
-        Ejemplo:  
-        Si tuvo 20 entregas y 5 rechazos:
-
-        ```text
-        pct_rechazo = 5 / 20 = 25%
-        ```
-
-        #### % HL rechazado
-
-        ```python
         pct_hl_rechazado =
             hl_rechazados_cliente / hl_comprados_cliente
         ```
 
-        Esto mide qué tan problemático es el cliente en volumen.
+        Estos porcentajes muestran qué tan grave es el problema dentro del propio cliente.
 
-        Ejemplo:  
-        Si compró 100 HL y rechazó 15 HL:
+        ### 4. Ajuste de representatividad
 
-        ```text
-        pct_hl_rechazado = 15 / 100 = 15%
-        ```
-
-        ---
-
-        ### Paso 4: se ajustan los porcentajes para evitar falsos críticos
-
-        Este es el punto más importante.
-
-        Un cliente puede tener 100% de rechazo porque tuvo 1 entrega y rechazó 1.  
-        Pero si ese cliente casi no pesa en el total del filtro, no debería ganarle a un cliente que rechaza muchas veces o pierde mucho volumen.
-
-        Por eso el dashboard ajusta los porcentajes con representatividad.
-
-        #### % rechazo representativo
+        El porcentaje solo no alcanza, porque un cliente con 1 entrega y 1 rechazo tendría 100%.  
+        Para evitar eso, el porcentaje se multiplica por la raíz cuadrada de su participación.
 
         ```python
         pct_rechazo_representativo =
             pct_rechazo * sqrt(participacion_entregas)
-        ```
 
-        En el código esto está escrito así:
-
-        ```python
-        pct_rechazo_representativo =
-            pct_rechazo * (participacion_entregas ** 0.5)
-        ```
-
-        #### % HL rechazado representativo
-
-        ```python
         pct_hl_rechazado_representativo =
             pct_hl_rechazado * sqrt(participacion_hl_comprados)
         ```
 
-        En el código:
+        **Por qué usamos raíz cuadrada:**  
+        Sirve para dar peso a clientes representativos sin castigar demasiado a clientes medianos.  
+        Baja el efecto de casos muy pequeños, pero no elimina completamente su importancia.
 
-        ```python
-        pct_hl_rechazado_representativo =
-            pct_hl_rechazado * (participacion_hl_comprados ** 0.5)
-        ```
+        ### 5. Normalización de componentes
 
-        #### ¿Por qué se usa raíz cuadrada?
-
-        La raíz cuadrada suaviza el efecto del tamaño.
-
-        Si usáramos la participación directa, castigaríamos demasiado a clientes medianos.  
-        Si no usáramos participación, clientes muy pequeños podrían subir demasiado solo por tener porcentajes altos.
-
-        La raíz cuadrada queda en un punto medio:
-
-        - Baja el impacto de clientes muy pequeños.
-        - Mantiene visibles a clientes medianos.
-        - Da más peso a clientes realmente representativos.
-
-        Ejemplo simplificado:
-
-        Cliente pequeño:
-
-        ```text
-        pct_rechazo = 100%
-        participacion_entregas = 0.1%
-        sqrt(0.1%) = 3.16%
-
-        pct_rechazo_representativo = 100% * 3.16% = 3.16%
-        ```
-
-        Cliente más representativo:
-
-        ```text
-        pct_rechazo = 30%
-        participacion_entregas = 10%
-        sqrt(10%) = 31.62%
-
-        pct_rechazo_representativo = 30% * 31.62% = 9.49%
-        ```
-
-        Aunque el primer cliente tiene 100% de rechazo, el segundo queda más arriba porque representa mucho más dentro de la operación.
-
-        ---
-
-        ### Paso 5: se normaliza cada componente
-
-        Después de calcular las variables, cada componente se normaliza contra el cliente más alto del filtro.
-
-        Esto lleva cada componente a una escala de 0 a 1.
-
-        #### Componente cantidad de rechazos
+        Cada componente se lleva a una escala de 0 a 1 comparándolo contra el cliente más alto del filtro.
 
         ```python
         comp_cantidad_rechazos =
             participacion_rechazos / max(participacion_rechazos)
-        ```
 
-        #### Componente HL rechazado
-
-        ```python
         comp_hl_rechazado =
             participacion_hl_rechazado / max(participacion_hl_rechazado)
-        ```
 
-        #### Componente % rechazo representativo
-
-        ```python
         comp_pct_rechazo =
             pct_rechazo_representativo / max(pct_rechazo_representativo)
-        ```
 
-        #### Componente % HL representativo
-
-        ```python
         comp_pct_hl =
             pct_hl_rechazado_representativo / max(pct_hl_rechazado_representativo)
         ```
 
-        Ejemplo:
+        **Interpretación:**  
+        El cliente más alto de cada componente queda con valor 1.  
+        Los demás quedan proporcionales contra ese máximo.
 
-        Si el cliente con más HL rechazado tiene 50 HL y otro cliente tiene 25 HL:
-
-        ```text
-        comp_hl_rechazado = 25 / 50 = 0.50
-        ```
-
-        Eso significa que ese cliente tiene el 50% del peso del mayor cliente en ese componente.
-
-        ---
-
-        ### Paso 6: se aplica la fórmula final
-
-        El score final combina los cuatro componentes con pesos.
+        ### 6. Fórmula final del score
 
         ```python
         score_criticidad = 100 * (
@@ -670,31 +490,16 @@ def mostrar_glosario():
         )
         ```
 
-        Los pesos suman 100%:
+        ### 7. Pesos usados
 
-        ```text
-        30% + 35% + 20% + 15% = 100%
-        ```
-
-        ---
-
-        ### Paso 7: interpretación de los pesos
-
-        | Componente | Peso | Qué prioriza |
+        | Componente | Peso | Razón operativa |
         |---|---:|---|
-        | `comp_hl_rechazado` | **35%** | Clientes donde se pierde más volumen. |
-        | `comp_cantidad_rechazos` | **30%** | Clientes con más recurrencia de rechazo. |
-        | `comp_pct_rechazo` | **20%** | Clientes con mala tasa de rechazo, ajustada por representatividad. |
-        | `comp_pct_hl` | **15%** | Clientes con alto impacto en volumen rechazado, ajustado por representatividad. |
+        | **HL rechazados** | 35% | Es el impacto directo en volumen perdido. |
+        | **Cantidad de rechazos** | 30% | Identifica recurrencia operativa. |
+        | **% rechazo representativo** | 20% | Mide gravedad del rechazo, pero ajustada por tamaño del cliente. |
+        | **% HL rechazado representativo** | 15% | Mide gravedad del volumen rechazado, ajustada por volumen comprado. |
 
-        El mayor peso está en **HL rechazados** porque el objetivo es recuperar volumen.  
-        El segundo peso está en **cantidad de rechazos** porque también importa reducir recurrencia operativa.
-
-        ---
-
-        ### Paso 8: prioridad final
-
-        Después de calcular el score, se clasifica así:
+        ### 8. Lectura del score
 
         | Score | Prioridad |
         |---:|---|
@@ -703,62 +508,17 @@ def mostrar_glosario():
         | `>= 25 y < 50` | 🟡 MEDIA |
         | `< 25` | 🟢 BAJA |
 
-        ---
+        ### 9. Ejemplo simple
 
-        ### Ejemplo práctico completo
+        Un cliente puede tener 100% de rechazo, pero si solo tiene 1 entrega y poco HL, su participación en el filtro será baja.  
+        Entonces su score no subirá tanto.
 
-        Imagina que dentro de un filtro de DPS hay:
+        En cambio, un cliente con muchos rechazos, varios HL rechazados y porcentajes altos tendrá un score mayor porque combina:
 
-        ```text
-        Total rechazos filtro = 100
-        Total HL rechazados filtro = 500
-        Total entregas filtro = 1,000
-        Total HL comprados filtro = 5,000
-        ```
-
-        Cliente A:
-
-        ```text
-        Entregas totales = 40
-        Entregas rechazadas = 8
-        HL comprados = 200
-        HL rechazados = 40
-        ```
-
-        Cálculos:
-
-        ```text
-        participacion_rechazos = 8 / 100 = 8%
-        participacion_hl_rechazado = 40 / 500 = 8%
-        participacion_entregas = 40 / 1000 = 4%
-        participacion_hl_comprados = 200 / 5000 = 4%
-
-        pct_rechazo = 8 / 40 = 20%
-        pct_hl_rechazado = 40 / 200 = 20%
-
-        pct_rechazo_representativo = 20% * sqrt(4%) = 20% * 20% = 4%
-        pct_hl_rechazado_representativo = 20% * sqrt(4%) = 4%
-        ```
-
-        Luego esos valores se comparan contra los máximos del filtro y entran a la fórmula final.
-
-        ---
-
-        ### Resumen simple
-
-        El score sube cuando un cliente:
-
-        - Rechaza muchas veces.
-        - Tiene mucho HL rechazado.
-        - Tiene alto % de rechazo.
-        - Tiene alto % de HL rechazado.
-        - Además representa una parte importante del filtro actual.
-
-        El score baja cuando:
-
-        - El cliente tiene pocos eventos.
-        - Tiene poco volumen.
-        - Su porcentaje es alto pero no representa mucho dentro de la operación.
+        - Relevancia en cantidad.
+        - Relevancia en volumen.
+        - Gravedad porcentual.
+        - Representatividad dentro del filtro.
         """)
 
     with st.expander("✅ Sugerencias operativas", expanded=False):
@@ -776,7 +536,7 @@ def mostrar_glosario():
 
     with st.expander("🔁 Top 10 y avance operativo", expanded=False):
         st.markdown("""
-        El dashboard muestra los **10 clientes más críticos** según el score.
+        El tablero muestra los **10 clientes más críticos** según el score.
 
         Si el equipo ya gestionó esos 10 clientes, puede marcar:
 
@@ -787,7 +547,7 @@ def mostrar_glosario():
         - Clientes 1 al 10.
         - Clientes 11 al 20.
         - Clientes 21 al 30.
-        - Clientes 31 al 40.
+        - Y así sucesivamente.
         """)
 
 # =========================================================
@@ -1093,18 +853,21 @@ with header_left:
 
 with header_right:
     st.write("")
-    if st.button("ℹ️ Información", use_container_width=True):
-        ir_a_informacion()
+    st.button(
+        "ℹ️ Información",
+        on_click=ir_a_informacion,
+        use_container_width=True
+    )
 
 if st.session_state["vista_actual"] == "informacion":
     mostrar_glosario()
     st.stop()
 
-ultima_actualizacion = get_last_update()
+ultima_actualizacion = get_last_github_update()
 
 st.caption(
     f"Herramienta para detectar clientes críticos, recuperar HL y reducir rechazos con foco operativo. "
-    f"Última fecha de actualización: {ultima_actualizacion}."
+    f"Última actualización CSV GitHub: {ultima_actualizacion} hora Bolivia."
 )
 
 # =========================================================
