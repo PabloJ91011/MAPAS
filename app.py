@@ -20,6 +20,7 @@ st.set_page_config(
 CSV_URL = "https://raw.githubusercontent.com/PabloJ91011/MAPAS/main/otif_h3.csv"
 GITHUB_API_COMMITS_URL = "https://api.github.com/repos/PabloJ91011/MAPAS/commits"
 PEDIDOS_PROGRAMADOS_URL = "https://raw.githubusercontent.com/PabloJ91011/MAPAS/main/otif_h3_15-06-2026_15h22.csv.gz"
+PEDIDOS_PROGRAMADOS_FILENAME = "otif_h3_15-06-2026_15h22.csv.gz"
 # =========================================================
 # CARGA DATOS
 # =========================================================
@@ -70,7 +71,46 @@ def get_last_update():
 
     except Exception:
         return "No disponible"
+        
+@st.cache_data(ttl=600)
+def get_last_update_pedidos():
+    try:
+        params = {
+            "path": PEDIDOS_PROGRAMADOS_FILENAME,
+            "per_page": 1
+        }
 
+        headers = {
+            "User-Agent": "streamlit-pedidos-dashboard"
+        }
+
+        r = requests.get(
+            GITHUB_API_COMMITS_URL,
+            params=params,
+            headers=headers,
+            timeout=10
+        )
+
+        r.raise_for_status()
+        data = r.json()
+
+        if not data:
+            return "Sin dato"
+
+        fecha_utc = data[0]["commit"]["committer"]["date"]
+
+        dt_utc = datetime.fromisoformat(
+            fecha_utc.replace("Z", "+00:00")
+        )
+
+        dt_local = dt_utc.astimezone(
+            ZoneInfo("America/La_Paz")
+        )
+
+        return dt_local.strftime("%d/%m/%Y %H:%M:%S")
+
+    except Exception:
+        return "No disponible"
 
 df = load_data()
 
@@ -1530,14 +1570,175 @@ def construir_base_pedidos_preventiva(pedidos, historico, fecha_objetivo):
 
     return base, detalle_pedidos
 
+def construir_comunicar_buffer(pedidos, historico, hoy):
+    # Pedidos con fecha de entrega anterior a hoy
+    # y que siguen pendientes en estado LIB o RET
+    buffer = pedidos[
+        (pedidos["fecha_entrega"] < hoy) &
+        (pedidos["sts"].isin(["LIB", "RET"]))
+    ].copy()
+
+    if buffer.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    buffer["dias_atraso"] = buffer["fecha_entrega"].apply(
+        lambda x: (hoy - x).days if pd.notnull(x) else 0
+    )
+
+    detalle_buffer = buffer.copy()
+
+    buffer_cliente = (
+        buffer
+        .groupby(
+            [
+                "cliente",
+                "cliente_nombre",
+                "dps"
+            ],
+            as_index=False
+        )
+        .agg(
+            fecha_entrega_mas_antigua=("fecha_entrega", "min"),
+            fecha_entrega_mas_reciente=("fecha_entrega", "max"),
+            dias_atraso_max=("dias_atraso", "max"),
+            pedidos_buffer=("nro", "nunique"),
+            lista_pedidos=("nro", lambda x: ", ".join(sorted(x.astype(str).unique()))),
+            hl_buffer=("hl", "sum"),
+            bultos_buffer=("bultos", "sum"),
+            importe_buffer=("importe_total", "sum"),
+            estados=("sts", lambda x: ", ".join(sorted(x.astype(str).unique()))),
+            zona_desc=("zona_desc", "first"),
+            region_desc=("region_desc", "first"),
+            gerencia_desc=("gerencia_desc", "first"),
+            trr_desc=("trr_desc", "first"),
+            domicilio=("domicilio", "first"),
+            localidad=("localidad", "first")
+        )
+    )
+
+    hist = historico.copy()
+
+    hist_cols = [
+        "cliente",
+        "entregas_totales",
+        "entregas_rech",
+        "hl_rechazados",
+        "pct_rechazo",
+        "pct_hl_rechazado",
+        "motivo_rechazo_principal",
+        "ventana_horaria_recepcion",
+        "ventana_local_cerrado",
+        "accion_recomendada",
+        "score_criticidad",
+        "prioridad"
+    ]
+
+    hist_cols = [c for c in hist_cols if c in hist.columns]
+
+    hist = hist[hist_cols].drop_duplicates("cliente")
+
+    buffer_cliente = buffer_cliente.merge(
+        hist,
+        on="cliente",
+        how="left"
+    )
+
+    fill_num = [
+        "entregas_totales",
+        "entregas_rech",
+        "hl_rechazados",
+        "pct_rechazo",
+        "pct_hl_rechazado",
+        "score_criticidad"
+    ]
+
+    for col in fill_num:
+        if col in buffer_cliente.columns:
+            buffer_cliente[col] = pd.to_numeric(
+                buffer_cliente[col],
+                errors="coerce"
+            ).fillna(0)
+
+    fill_text = [
+        "motivo_rechazo_principal",
+        "ventana_horaria_recepcion",
+        "ventana_local_cerrado",
+        "accion_recomendada",
+        "prioridad"
+    ]
+
+    for col in fill_text:
+        if col in buffer_cliente.columns:
+            buffer_cliente[col] = buffer_cliente[col].fillna("SIN HISTÓRICO").astype(str)
+
+    # Score buffer:
+    # Prioriza más días de atraso, más HL pendiente, y clientes críticos históricamente
+    max_dias = max(buffer_cliente["dias_atraso_max"].max(), 1)
+    max_hl = max(buffer_cliente["hl_buffer"].max(), 0.01)
+
+    buffer_cliente["impacto_dias_atraso"] = buffer_cliente["dias_atraso_max"] / max_dias
+    buffer_cliente["impacto_hl_buffer"] = buffer_cliente["hl_buffer"] / max_hl
+
+    buffer_cliente["score_comunicar_buffer"] = 100 * (
+        buffer_cliente["impacto_dias_atraso"] * 0.40 +
+        buffer_cliente["impacto_hl_buffer"] * 0.35 +
+        (buffer_cliente["score_criticidad"] / 100) * 0.25
+    )
+
+    buffer_cliente["score_comunicar_buffer"] = (
+        buffer_cliente["score_comunicar_buffer"]
+        .round(1)
+    )
+
+    buffer_cliente["prioridad_buffer"] = np.select(
+        [
+            buffer_cliente["score_comunicar_buffer"] >= 70,
+            buffer_cliente["score_comunicar_buffer"] >= 50,
+            buffer_cliente["score_comunicar_buffer"] >= 30
+        ],
+        [
+            "🚨 COMUNICAR URGENTE",
+            "🟠 ALTO",
+            "🟡 MONITOREAR"
+        ],
+        default="🟢 BAJO"
+    )
+
+    def accion_buffer(row):
+        if row["dias_atraso_max"] >= 3:
+            return "Comunicar al equipo: pedido con varios días de atraso y aún pendiente LIB/RET."
+
+        if row["hl_buffer"] >= 10:
+            return "Comunicar por alto volumen pendiente en buffer."
+
+        if row["score_criticidad"] >= 50:
+            return "Comunicar por cliente históricamente crítico con pedido vencido."
+
+        return "Validar si corresponde reprogramar, liberar o depurar pedido pendiente."
+
+    buffer_cliente["accion_buffer"] = buffer_cliente.apply(accion_buffer, axis=1)
+
+    buffer_cliente = buffer_cliente.sort_values(
+        ["score_comunicar_buffer", "dias_atraso_max", "hl_buffer"],
+        ascending=[False, False, False]
+    ).reset_index(drop=True)
+
+    detalle_buffer = detalle_buffer.sort_values(
+        ["cliente", "fecha_entrega", "nro", "producto_nombre"]
+    )
+
+    return buffer_cliente, detalle_buffer
 
 def mostrar_pedidos_manana(historico_filtrado):
     col_titulo, col_boton = st.columns([5, 1])
 
     with col_titulo:
+        ultima_actualizacion_pedidos = get_last_update_pedidos()
+    
         st.title("📞 Pedidos para llamar")
         st.caption(
-            "Cruce preventivo entre pedidos programados y clientes con historial de rechazo."
+            "Cruce preventivo entre pedidos programados y clientes con historial de rechazo. "
+            f"Última actualización pedidos: {ultima_actualizacion_pedidos}."
         )
 
     with col_boton:
@@ -1571,6 +1772,12 @@ def mostrar_pedidos_manana(historico_filtrado):
 
 
     hoy = datetime.now(ZoneInfo("America/La_Paz")).date()
+
+    buffer_clientes, detalle_buffer = construir_comunicar_buffer(
+        pedidos,
+        historico,
+        hoy
+    )
 
     opciones = []
 
@@ -1648,6 +1855,124 @@ def mostrar_pedidos_manana(historico_filtrado):
     m1.metric("Clientes con pedido", f"{total_clientes:,.0f}")
     m2.metric("Pedidos programados", f"{total_pedidos:,.0f}")
     m3.metric("HL programados", f"{total_hl:,.1f}")
+
+    # =========================================================
+    # COMUNICAR BUFFER
+    # =========================================================
+    
+    st.markdown("### 📣 Comunicar buffer")
+    
+    if buffer_clientes.empty:
+        st.success("No hay pedidos vencidos pendientes en estado LIB o RET.")
+    else:
+        total_clientes_buffer = buffer_clientes["cliente"].nunique()
+        total_pedidos_buffer = buffer_clientes["pedidos_buffer"].sum()
+        total_hl_buffer = buffer_clientes["hl_buffer"].sum()
+        max_dias_buffer = buffer_clientes["dias_atraso_max"].max()
+    
+        b1, b2, b3, b4 = st.columns(4)
+    
+        b1.metric("Clientes en buffer", f"{total_clientes_buffer:,.0f}")
+        b2.metric("Pedidos en buffer", f"{total_pedidos_buffer:,.0f}")
+        b3.metric("HL en buffer", f"{total_hl_buffer:,.1f}")
+        b4.metric("Mayor atraso", f"{int(max_dias_buffer)} días")
+    
+        st.caption(
+            "Clientes con fecha de entrega anterior a hoy y pedidos aún en estado LIB o RET."
+        )
+    
+        top_buffer = buffer_clientes.head(10).copy()
+    
+        st.dataframe(
+            top_buffer[
+                [
+                    "prioridad_buffer",
+                    "score_comunicar_buffer",
+                    "cliente",
+                    "cliente_nombre",
+                    "dps",
+                    "fecha_entrega_mas_antigua",
+                    "fecha_entrega_mas_reciente",
+                    "dias_atraso_max",
+                    "pedidos_buffer",
+                    "lista_pedidos",
+                    "hl_buffer",
+                    "estados",
+                    "motivo_rechazo_principal",
+                    "accion_buffer"
+                ]
+            ],
+            use_container_width=True,
+            height=330,
+            hide_index=True,
+            column_config={
+                "score_comunicar_buffer": st.column_config.NumberColumn(
+                    "Score buffer",
+                    format="%.1f"
+                ),
+                "hl_buffer": st.column_config.NumberColumn(
+                    "HL buffer",
+                    format="%.2f"
+                )
+            }
+        )
+    
+        with st.expander("📱 Vista móvil comunicar buffer", expanded=False):
+            for _, row in top_buffer.iterrows():
+                with st.container(border=True):
+                    st.markdown(f"""
+    ### {row['prioridad_buffer']} | {row['cliente']} - {row['cliente_nombre']}
+    
+    **Score buffer:** {row['score_comunicar_buffer']:.1f}  
+    **DPS:** {row['dps']}  
+    **Pedidos pendientes:** {row['pedidos_buffer']}  
+    **Nros pedido:** {row['lista_pedidos']}  
+    **Estados:** {row['estados']}  
+    **Fecha más antigua:** {row['fecha_entrega_mas_antigua']}  
+    **Fecha más reciente:** {row['fecha_entrega_mas_reciente']}  
+    **Días de atraso:** {int(row['dias_atraso_max'])}  
+    **HL en buffer:** {row['hl_buffer']:.2f}  
+    **Motivo histórico principal:** {row['motivo_rechazo_principal']}  
+    
+    👉 **Acción:** {row['accion_buffer']}  
+    
+    **Zona:** {row.get('zona_desc', 'SIN DATO')}  
+    **Dirección:** {row.get('domicilio', 'SIN DATO')}
+                    """)
+    
+        with st.expander("🧾 Detalle completo buffer", expanded=False):
+            st.dataframe(
+                detalle_buffer[
+                    [
+                        "fecha_entrega",
+                        "dias_atraso",
+                        "cliente",
+                        "cliente_nombre",
+                        "dps",
+                        "nro",
+                        "sts",
+                        "producto",
+                        "producto_nombre",
+                        "bultos",
+                        "hl",
+                        "importe_total",
+                        "zona_desc",
+                        "domicilio"
+                    ]
+                ],
+                use_container_width=True,
+                height=420,
+                hide_index=True
+            )
+    
+            csv_buffer = buffer_clientes.to_csv(index=False).encode("utf-8-sig")
+    
+            st.download_button(
+                "📥 Descargar comunicar buffer CSV",
+                csv_buffer,
+                "comunicar_buffer.csv",
+                "text/csv"
+            )
 
     st.markdown("### 🚨 Top clientes a llamar preventivamente")
 
