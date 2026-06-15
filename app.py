@@ -4,6 +4,8 @@ import requests
 from io import StringIO
 import matplotlib.pyplot as plt
 import html
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # =========================================================
 # CONFIG
@@ -14,16 +16,59 @@ st.set_page_config(
     layout="wide"
 )
 
+CSV_URL = "https://raw.githubusercontent.com/PabloJ91011/MAPAS/main/otif_h3.csv"
+GITHUB_API_COMMITS_URL = "https://api.github.com/repos/PabloJ91011/MAPAS/commits"
+
 # =========================================================
 # CARGA DATOS
 # =========================================================
 
 @st.cache_data
 def load_data():
-    url = "https://raw.githubusercontent.com/PabloJ91011/MAPAS/main/otif_h3.csv"
-    r = requests.get(url)
+    r = requests.get(CSV_URL)
     r.raise_for_status()
     return pd.read_csv(StringIO(r.text))
+
+
+@st.cache_data(ttl=600)
+def get_last_github_update():
+    try:
+        params = {
+            "path": "otif_h3.csv",
+            "per_page": 1
+        }
+
+        headers = {
+            "User-Agent": "streamlit-otif-dashboard"
+        }
+
+        r = requests.get(
+            GITHUB_API_COMMITS_URL,
+            params=params,
+            headers=headers,
+            timeout=10
+        )
+
+        r.raise_for_status()
+        data = r.json()
+
+        if not data:
+            return "Sin dato"
+
+        fecha_utc = data[0]["commit"]["committer"]["date"]
+
+        dt_utc = datetime.fromisoformat(
+            fecha_utc.replace("Z", "+00:00")
+        )
+
+        dt_local = dt_utc.astimezone(
+            ZoneInfo("America/La_Paz")
+        )
+
+        return dt_local.strftime("%d/%m/%Y %H:%M:%S")
+
+    except Exception:
+        return "No disponible"
 
 
 df = load_data()
@@ -121,7 +166,7 @@ def accion_operativa(row):
     if "LOCAL CERRADO" in motivo:
         return (
             f"Revisar ventanas de entrega. El cliente normalmente recibe en {ventana_ok}. "
-            f"Los rechazos por local cerrado aparecen en {ventana_cerrado}. "
+            f"La ventana de rechazo por local cerrado es {ventana_cerrado}. "
             f"Contactar al cliente y ajustar la entrega a la ventana más efectiva."
         )
 
@@ -202,19 +247,6 @@ def normalizar_serie(s):
 
 
 def calcular_score_criticidad(data):
-    """
-    Score representativo contra el total filtrado.
-
-    Combina:
-    - Cantidad de rechazos
-    - HL rechazados
-    - % rechazo ajustado por representatividad de entregas
-    - % HL rechazado ajustado por representatividad de HL comprado
-
-    Evita que clientes con 1 entrega y 100% rechazo salgan arriba
-    si no representan volumen ni cantidad relevante.
-    """
-
     base = data.copy()
 
     total_rechazos_filtro = max(base["entregas_rech"].sum(), 1)
@@ -283,6 +315,247 @@ def clasificar_prioridad(score):
         return "🟡 MEDIA"
     else:
         return "🟢 BAJA"
+
+# =========================================================
+# GLOSARIO
+# =========================================================
+
+def mostrar_glosario():
+    st.title("📘 Glosario de Medidas y Reglas")
+    st.caption(
+        "Guía simple para entender cómo se calculan los indicadores del dashboard."
+    )
+
+    st.markdown("""
+    ## 1. Clientes compradores
+
+    Es la cantidad de clientes únicos que aparecen en la base filtrada.
+
+    **Ejemplo:**  
+    Si un cliente tiene varias entregas, se cuenta una sola vez.
+
+    ---
+
+    ## 2. Clientes rechazadores
+
+    Son los clientes que tienen al menos una entrega rechazada.
+
+    **Regla:**  
+    Cliente rechazador = cliente con `entregas_rech > 0`.
+
+    ---
+
+    ## 3. Clientes suspendidos
+
+    Son los clientes que tienen al menos una entrega suspendida.
+
+    **Regla:**  
+    Cliente suspendido = cliente con `entregas_sus > 0`.
+
+    ---
+
+    ## 4. Entregas totales
+
+    Es la cantidad total de entregas registradas para el cliente dentro del periodo analizado.
+
+    ---
+
+    ## 5. Rechazos
+
+    Es la cantidad de entregas que terminaron como rechazo.
+
+    **Regla:**  
+    Se usa el campo `entregas_rech`.
+
+    ---
+
+    ## 6. Suspensiones
+
+    Es la cantidad de entregas que quedaron suspendidas.
+
+    **Regla:**  
+    Se usa el campo `entregas_sus`.
+
+    ---
+
+    ## 7. Entregas OK
+
+    Es la cantidad de entregas que fueron completadas correctamente.
+
+    **Regla:**  
+    Se usa el campo `entregas_ok`.
+
+    ---
+
+    ## 8. HL comprados
+
+    Es el volumen total comprado por el cliente en hectolitros.
+
+    **Regla:**  
+    Se usa el campo `hl_comprados`.
+
+    ---
+
+    ## 9. HL rechazados
+
+    Es el volumen que no se pudo entregar porque terminó en rechazo.
+
+    **Regla:**  
+    Se usa el campo `hl_rechazados`.
+
+    ---
+
+    ## 10. % rechazo
+
+    Mide qué parte de las entregas del cliente terminó rechazada.
+
+    **Regla:**  
+    `% rechazo = entregas rechazadas / entregas totales`
+
+    **Ejemplo:**  
+    Si un cliente tuvo 10 entregas y rechazó 2, su % rechazo es 20%.
+
+    ---
+
+    ## 11. % HL rechazado
+
+    Mide qué parte del volumen comprado terminó rechazado.
+
+    **Regla:**  
+    `% HL rechazado = HL rechazados / HL comprados`
+
+    **Ejemplo:**  
+    Si un cliente compró 100 HL y rechazó 15 HL, su % HL rechazado es 15%.
+
+    ---
+
+    ## 12. Frecuencia semanal
+
+    Indica cuántas veces por semana, en promedio, se entrega al cliente.
+
+    **Regla:**  
+    `frecuencia semanal = entregas totales / semanas activas`
+
+    **Uso operativo:**  
+    Un cliente con alta frecuencia y muchos rechazos debe revisarse rápido porque el problema se repite seguido.
+
+    ---
+
+    ## 13. Madurez del cliente
+
+    La madurez ayuda a entender si el cliente tiene poco o mucho historial.
+
+    **Regla usada:**
+
+    - **BAJA:** menos de 4 semanas activas
+    - **MEDIA:** entre 4 y menos de 8 semanas activas
+    - **ALTA:** 8 semanas activas o más
+
+    **Interpretación:**  
+    Un cliente con madurez baja puede tener poca historia todavía.  
+    Un cliente con madurez alta tiene suficiente historial para tomar mejores decisiones.
+
+    ---
+
+    ## 14. Ventana horaria de recepción
+
+    Es la ventana donde el cliente normalmente logra recibir mejor.
+
+    **Ejemplo:**  
+    `MAÑANA`, `TARDE` o `NOCHE`.
+
+    **Uso operativo:**  
+    Sirve para saber en qué horario conviene intentar entregar.
+
+    ---
+
+    ## 15. Ventana de rechazo por local cerrado
+
+    Esta medida muestra en qué ventana horaria ocurren más rechazos por motivo **LOCAL CERRADO**.
+
+    **Ejemplo:**  
+    Si dice `TARDE (12:00-18:00)`, significa que los rechazos por local cerrado se concentran más en la tarde.
+
+    **Uso operativo:**  
+    Comparar esta ventana contra la ventana horaria de recepción.  
+    Si el cliente recibe bien de noche pero rechaza por local cerrado en la tarde, la acción sugerida será mover o validar la entrega hacia la noche.
+
+    ---
+
+    ## 16. Score de criticidad
+
+    Es el puntaje que usamos para ordenar a los clientes más importantes a revisar.
+
+    El objetivo es evitar que un cliente con una sola entrega y 100% rechazo aparezca arriba si no representa mucho volumen ni muchos rechazos.
+
+    El score combina 4 cosas:
+
+    1. **Cantidad de rechazos:** clientes que rechazan muchas veces.
+    2. **HL rechazados:** clientes donde se pierde más volumen.
+    3. **% rechazo:** qué tan grave es el rechazo dentro de sus entregas.
+    4. **% HL rechazado:** qué tan grave es el rechazo dentro de su volumen comprado.
+
+    Además, el cálculo se compara contra el total del filtro seleccionado.
+
+    **Ejemplo:**  
+    Si filtras un DPS, el score se recalcula solo contra los clientes de ese DPS.
+
+    ---
+
+    ## 17. Prioridad
+
+    La prioridad se asigna usando el score de criticidad.
+
+    **Regla:**
+
+    - **🔥 CRÍTICA:** score mayor o igual a 75
+    - **🟠 ALTA:** score entre 50 y 74.9
+    - **🟡 MEDIA:** score entre 25 y 49.9
+    - **🟢 BAJA:** score menor a 25
+
+    ---
+
+    ## 18. Sugerencias operativas
+
+    Las sugerencias se generan según el motivo principal de rechazo.
+
+    **Reglas principales:**
+
+    - **LOCAL CERRADO:** revisar ventanas de entrega, contactar al cliente y ajustar horario.
+    - **SIN DINERO:** contactar antes del despacho para confirmar disponibilidad de pago.
+    - **NO RECIBE / RECHAZA:** hacer llamada preventiva antes de programar entrega.
+    - **DIRECCIÓN / NO UBICADO:** validar ubicación y referencias.
+    - **MAL PEDIDO:** revisar pedido con ventas antes de despacho.
+    - **STOCK:** validar disponibilidad y causa del faltante.
+    - **Otros motivos:** revisar historial operativo y definir acción con reparto/ventas.
+
+    ---
+
+    ## 19. Top 10 clientes a intervenir
+
+    Es el ranking de los clientes más críticos según el score.
+
+    **Uso operativo:**  
+    Permite enfocar la gestión en pocos clientes que pueden ayudar a recuperar más HL y reducir rechazos.
+
+    ---
+
+    ## 20. Ya atendí estos 10 clientes
+
+    Esta opción permite avanzar al siguiente grupo de clientes críticos.
+
+    **Ejemplo:**
+
+    - Primero ves clientes 1 al 10.
+    - Si ya los atendiste, marcas la opción.
+    - El dashboard muestra clientes 11 al 20.
+    - Puedes aumentar la cantidad atendida para ver 21 al 30, 31 al 40, etc.
+    """)
+
+    st.info(
+        "Este glosario está pensado para equipos operativos. "
+        "No busca explicar la fórmula técnica completa, sino cómo interpretar y usar cada medida."
+    )
 
 # =========================================================
 # HTML EXPORT
@@ -385,7 +658,7 @@ def generar_html_fichas(clientes_df):
                 <tr><td>Código motivo</td><td>{row['codigo_motivo_principal']}</td></tr>
                 <tr><td>Resumen motivos</td><td>{resumen}</td></tr>
                 <tr><td>Ventana horaria recepción</td><td>{ventana_rec}</td></tr>
-                <tr><td>Ventana local cerrado</td><td>{ventana_cerrado}</td></tr>
+                <tr><td>Ventana de rechazo por local cerrado</td><td>{ventana_cerrado}</td></tr>
                 <tr><td>Día entrega</td><td>{row['dia_entrega']}</td></tr>
                 <tr><td>Días flex</td><td>{row['dias_flex']}</td></tr>
             </table>
@@ -493,7 +766,7 @@ def mostrar_mapa_clientes(data, titulo):
             "ScatterplotLayer",
             data=mapa,
             get_position="[lon, lat]",
-            get_radius=130,
+            get_radius=75,
             get_fill_color=[220, 30, 30, 190],
             get_line_color=[0, 0, 0, 255],
             line_width_min_pixels=1,
@@ -506,13 +779,13 @@ def mostrar_mapa_clientes(data, titulo):
             data=mapa,
             get_position="[lon, lat]",
             get_text="cliente",
-            get_size=15,
+            get_size=14,
             get_color=[0, 0, 0, 255],
             get_text_anchor="'middle'",
             get_alignment_baseline="'bottom'",
         )
 
-        zoom_mapa = 12 if len(mapa) <= 3 else 10
+        zoom_mapa = 13 if len(mapa) <= 3 else 11
 
         view_state = pdk.ViewState(
             latitude=mapa["lat"].mean(),
@@ -577,8 +850,22 @@ def mostrar_mapa_clientes(data, titulo):
     )
 
 # =========================================================
-# SIDEBAR FILTROS
+# SIDEBAR NAVEGACIÓN Y FILTROS
 # =========================================================
+
+st.sidebar.title("🧭 Navegación")
+
+vista = st.sidebar.radio(
+    "Selecciona una vista",
+    [
+        "Dashboard operativo",
+        "Glosario de medidas"
+    ]
+)
+
+if vista == "Glosario de medidas":
+    mostrar_glosario()
+    st.stop()
 
 st.sidebar.title("🔎 Filtros")
 
@@ -646,8 +933,12 @@ if df_filtrado.empty:
 # =========================================================
 
 st.title("🚀 Centro de Oportunidades Operativas")
+
+ultima_actualizacion = get_last_github_update()
+
 st.caption(
-    "Herramienta para detectar clientes críticos, recuperar HL y reducir rechazos con foco operativo."
+    f"Herramienta para detectar clientes críticos, recuperar HL y reducir rechazos con foco operativo. "
+    f"Última actualización CSV GitHub: {ultima_actualizacion} hora Bolivia."
 )
 
 # =========================================================
@@ -730,6 +1021,12 @@ st.dataframe(
             "Frecuencia semanal",
             format="%.2f"
         ),
+        "ventana_horaria_recepcion": st.column_config.TextColumn(
+            "Ventana horaria de recepción"
+        ),
+        "ventana_local_cerrado": st.column_config.TextColumn(
+            "Ventana rechazo local cerrado"
+        ),
     }
 )
 
@@ -775,7 +1072,6 @@ pct_hl_rech_total = hl_rechazados / max(hl_comprados, 1)
 
 freq_prom = df_filtrado["frecuencia_semanal"].mean()
 
-# Fila 1: Clientes
 c1, c2, c3 = st.columns(3)
 
 c1.metric(
@@ -793,7 +1089,6 @@ c3.metric(
     f"{clientes_suspendidos:,}"
 )
 
-# Fila 2: Entregas
 e1, e2, e3, e4 = st.columns(4)
 
 e1.metric(
@@ -819,7 +1114,6 @@ e4.metric(
     f"{pct_ok_total:.1%}"
 )
 
-# Fila 3: HL y frecuencia
 h1, h2, h3 = st.columns(3)
 
 h1.metric(
@@ -1205,7 +1499,7 @@ if cliente_sel:
             ### ⏰ Ventanas
 
             - **Ventana horaria recepción:** {c['ventana_horaria_recepcion']}
-            - **Ventana local cerrado:** {c['ventana_local_cerrado']}
+            - **Ventana de rechazo por local cerrado:** {c['ventana_local_cerrado']}
             - **Día entrega:** {c['dia_entrega']}
             - **Días flex:** {c['dias_flex']}
 
