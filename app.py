@@ -4,8 +4,7 @@ import requests
 from io import StringIO
 import matplotlib.pyplot as plt
 import html
-from datetime import datetime
-from zoneinfo import ZoneInfo
+from datetime import datetime, timezone, timedelta
 
 # =========================================================
 # CONFIG
@@ -18,6 +17,30 @@ st.set_page_config(
 
 CSV_URL = "https://raw.githubusercontent.com/PabloJ91011/MAPAS/main/otif_h3.csv"
 GITHUB_API_COMMITS_URL = "https://api.github.com/repos/PabloJ91011/MAPAS/commits"
+
+# =========================================================
+# ESTADO DE NAVEGACIÓN
+# =========================================================
+
+if "vista_actual" not in st.session_state:
+    st.session_state["vista_actual"] = "dashboard"
+
+
+def safe_rerun():
+    try:
+        st.rerun()
+    except AttributeError:
+        st.experimental_rerun()
+
+
+def ir_a_informacion():
+    st.session_state["vista_actual"] = "informacion"
+    safe_rerun()
+
+
+def volver_al_dashboard():
+    st.session_state["vista_actual"] = "dashboard"
+    safe_rerun()
 
 # =========================================================
 # CARGA DATOS
@@ -61,15 +84,15 @@ def get_last_update():
             fecha_utc.replace("Z", "+00:00")
         )
 
+        # Bolivia = UTC -4
         dt_local = dt_utc.astimezone(
-            ZoneInfo("America/La_Paz")
+            timezone(timedelta(hours=-4))
         )
 
         return dt_local.strftime("%d/%m/%Y %H:%M:%S")
 
     except Exception:
         return "No disponible"
-
 
 df = load_data()
 
@@ -316,20 +339,6 @@ def clasificar_prioridad(score):
     else:
         return "🟢 BAJA"
 
-# =========================================================
-# NAVEGACIÓN
-# =========================================================
-
-if "vista_actual" not in st.session_state:
-    st.session_state["vista_actual"] = "dashboard"
-
-
-def ir_a_informacion():
-    st.session_state["vista_actual"] = "informacion"
-
-
-def volver_al_dashboard():
-    st.session_state["vista_actual"] = "dashboard"
 
 # =========================================================
 # GLOSARIO COMPACTO
@@ -346,11 +355,8 @@ def mostrar_glosario():
 
     with col_boton:
         st.write("")
-        st.button(
-            "⬅️ Volver al dashboard",
-            on_click=volver_al_dashboard,
-            use_container_width=True
-        )
+        if st.button("⬅️ Volver al dashboard", use_container_width=True):
+            volver_al_dashboard()
 
     st.divider()
 
@@ -1087,11 +1093,8 @@ with header_left:
 
 with header_right:
     st.write("")
-    st.button(
-        "ℹ️ Información",
-        on_click=ir_a_informacion,
-        use_container_width=True
-    )
+    if st.button("ℹ️ Información", use_container_width=True):
+        ir_a_informacion()
 
 if st.session_state["vista_actual"] == "informacion":
     mostrar_glosario()
