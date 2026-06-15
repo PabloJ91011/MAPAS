@@ -35,8 +35,19 @@ df = load_data()
 df.columns = df.columns.str.strip()
 
 # IDs seguros
-df["cliente"] = pd.to_numeric(df["cliente"], errors="coerce").fillna(0).astype(int).astype(str)
-df["dps"] = pd.to_numeric(df["dps"], errors="coerce").fillna(0).astype(int).astype(str)
+df["cliente"] = (
+    pd.to_numeric(df["cliente"], errors="coerce")
+    .fillna(0)
+    .astype(int)
+    .astype(str)
+)
+
+df["dps"] = (
+    pd.to_numeric(df["dps"], errors="coerce")
+    .fillna(0)
+    .astype(int)
+    .astype(str)
+)
 
 # Columnas texto
 text_cols = [
@@ -99,17 +110,9 @@ df["primera_fecha_entrega"] = pd.to_datetime(
 # =========================================================
 
 df["pct_rechazo"] = df["entregas_rech"] / df["entregas_totales"]
+df["pct_suspension"] = df["entregas_sus"] / df["entregas_totales"]
 df["pct_hl_rechazado"] = df["hl_rechazados"] / df["hl_comprados"]
 df["hl_entregados_estimados"] = df["hl_comprados"] - df["hl_rechazados"]
-
-# Si no existe HL suspendidos real, se estima proporcionalmente
-if "hl_suspendidos" not in df.columns:
-    df["hl_suspendidos"] = (
-        df["hl_comprados"] *
-        (df["entregas_sus"] / df["entregas_totales"])
-    )
-else:
-    df["hl_suspendidos"] = pd.to_numeric(df["hl_suspendidos"], errors="coerce").fillna(0)
 
 # =========================================================
 # MOTOR DE ACCIONES
@@ -193,7 +196,7 @@ df["accion_recomendada"] = df.apply(accion_operativa, axis=1)
 df["tipo_gestion"] = df.apply(tipo_gestion, axis=1)
 
 # =========================================================
-# FUNCIONES DE SCORE
+# SCORE DE CRITICIDAD REPRESENTATIVO
 # =========================================================
 
 def normalizar_serie(s):
@@ -205,16 +208,16 @@ def normalizar_serie(s):
 
 def calcular_score_criticidad(data):
     """
-    Score representativo contra el total del filtro.
+    Score representativo contra el total filtrado.
 
     Combina:
-    - Cantidad de rechazos del cliente vs total de rechazos del filtro
-    - HL rechazados del cliente vs total HL rechazado del filtro
+    - Cantidad de rechazos
+    - HL rechazados
     - % rechazo ajustado por representatividad de entregas
     - % HL rechazado ajustado por representatividad de HL comprado
 
-    Así evitamos que un cliente con 1 entrega y 100% rechazo salga arriba
-    si no representa volumen ni cantidad relevante.
+    Evita que clientes con 1 entrega y 100% rechazo salgan arriba
+    si no representan volumen ni cantidad relevante.
     """
 
     base = data.copy()
@@ -252,10 +255,21 @@ def calcular_score_criticidad(data):
         (base["participacion_hl_comprados"] ** 0.5)
     )
 
-    base["comp_cantidad_rechazos"] = normalizar_serie(base["participacion_rechazos"])
-    base["comp_hl_rechazado"] = normalizar_serie(base["participacion_hl_rechazado"])
-    base["comp_pct_rechazo"] = normalizar_serie(base["pct_rechazo_representativo"])
-    base["comp_pct_hl"] = normalizar_serie(base["pct_hl_rechazado_representativo"])
+    base["comp_cantidad_rechazos"] = normalizar_serie(
+        base["participacion_rechazos"]
+    )
+
+    base["comp_hl_rechazado"] = normalizar_serie(
+        base["participacion_hl_rechazado"]
+    )
+
+    base["comp_pct_rechazo"] = normalizar_serie(
+        base["pct_rechazo_representativo"]
+    )
+
+    base["comp_pct_hl"] = normalizar_serie(
+        base["pct_hl_rechazado_representativo"]
+    )
 
     base["score_criticidad"] = 100 * (
         base["comp_cantidad_rechazos"] * 0.30 +
@@ -277,9 +291,8 @@ def clasificar_prioridad(score):
     else:
         return "🟢 BAJA"
 
-
 # =========================================================
-# FUNCIONES HTML
+# HTML EXPORT
 # =========================================================
 
 def generar_html_fichas(clientes_df):
@@ -308,14 +321,33 @@ def generar_html_fichas(clientes_df):
         bloque = f"""
         <div class="card">
             <h1>{row['cliente']} - {nombre}</h1>
-            <p><b>DPS:</b> {row['dps']} | <b>Prioridad:</b> {row['prioridad']} | <b>Score:</b> {row['score_criticidad']:.1f}</p>
+            <p>
+                <b>DPS:</b> {row['dps']} |
+                <b>Prioridad:</b> {row['prioridad']} |
+                <b>Score:</b> {row['score_criticidad']:.1f}
+            </p>
 
             <div class="kpi-container">
-                <div class="kpi"><div class="kpi-title">HL comprados</div><div class="kpi-value">{row['hl_comprados']:.2f}</div></div>
-                <div class="kpi"><div class="kpi-title">HL rechazados</div><div class="kpi-value">{row['hl_rechazados']:.2f}</div></div>
-                <div class="kpi"><div class="kpi-title">% rechazo</div><div class="kpi-value">{row['pct_rechazo']:.1%}</div></div>
-                <div class="kpi"><div class="kpi-title">% HL rechazado</div><div class="kpi-value">{row['pct_hl_rechazado']:.1%}</div></div>
-                <div class="kpi"><div class="kpi-title">Frecuencia semanal</div><div class="kpi-value">{row['frecuencia_semanal']:.2f}</div></div>
+                <div class="kpi">
+                    <div class="kpi-title">HL comprados</div>
+                    <div class="kpi-value">{row['hl_comprados']:.2f}</div>
+                </div>
+                <div class="kpi">
+                    <div class="kpi-title">HL rechazados</div>
+                    <div class="kpi-value">{row['hl_rechazados']:.2f}</div>
+                </div>
+                <div class="kpi">
+                    <div class="kpi-title">% rechazo</div>
+                    <div class="kpi-value">{row['pct_rechazo']:.1%}</div>
+                </div>
+                <div class="kpi">
+                    <div class="kpi-title">% HL rechazado</div>
+                    <div class="kpi-value">{row['pct_hl_rechazado']:.1%}</div>
+                </div>
+                <div class="kpi">
+                    <div class="kpi-title">Frecuencia semanal</div>
+                    <div class="kpi-value">{row['frecuencia_semanal']:.2f}</div>
+                </div>
             </div>
 
             <h2>Acción Recomendada</h2>
@@ -343,13 +375,13 @@ def generar_html_fichas(clientes_df):
                 <tr><td>Entregas FEE</td><td>{int(row['entregas_fee'])}</td></tr>
                 <tr><td>Días activos</td><td>{int(row['dias_activos'])}</td></tr>
                 <tr><td>Semanas activas</td><td>{row['semanas_activas']:.2f}</td></tr>
+                <tr><td>Frecuencia semanal</td><td>{row['frecuencia_semanal']:.2f}</td></tr>
             </table>
 
             <h2>Volumen</h2>
             <table>
                 <tr><td>HL comprados</td><td>{row['hl_comprados']:.2f}</td></tr>
                 <tr><td>HL rechazados</td><td>{row['hl_rechazados']:.2f}</td></tr>
-                <tr><td>HL suspendidos estimados</td><td>{row['hl_suspendidos']:.2f}</td></tr>
                 <tr><td>HL entregados estimados</td><td>{row['hl_entregados_estimados']:.2f}</td></tr>
                 <tr><td>% HL rechazado</td><td>{row['pct_hl_rechazado']:.1%}</td></tr>
             </table>
@@ -441,7 +473,6 @@ def generar_html_fichas(clientes_df):
     </html>
     """
 
-
 # =========================================================
 # MAPA
 # =========================================================
@@ -470,6 +501,7 @@ def mostrar_mapa_clientes(data, titulo):
             data=mapa,
             get_position="[lon, lat]",
             get_radius=120,
+            get_fill_color=[220, 30, 30, 160],
             pickable=True,
             opacity=0.75,
         )
@@ -480,7 +512,7 @@ def mostrar_mapa_clientes(data, titulo):
             get_position="[lon, lat]",
             get_text="cliente",
             get_size=14,
-            get_angle=0,
+            get_color=[0, 0, 0, 255],
             get_text_anchor="'middle'",
             get_alignment_baseline="'bottom'",
         )
@@ -529,12 +561,21 @@ def mostrar_mapa_clientes(data, titulo):
                 "accion_recomendada"
             ]
         ],
-        use_container_width=True
+        use_container_width=True,
+        column_config={
+            "hl_rechazados": st.column_config.NumberColumn(
+                "HL rechazados",
+                format="%.2f"
+            ),
+            "score_criticidad": st.column_config.NumberColumn(
+                "Score",
+                format="%.1f"
+            ),
+        }
     )
 
-
 # =========================================================
-# SIDEBAR FILTROS BASE
+# SIDEBAR FILTROS
 # =========================================================
 
 st.sidebar.title("🔎 Filtros")
@@ -583,7 +624,7 @@ if df_filtrado.empty:
     st.warning("No hay datos con los filtros seleccionados.")
     st.stop()
 
-# Score recalculado contra el total del filtro
+# Score recalculado contra el total filtrado
 df_filtrado = calcular_score_criticidad(df_filtrado)
 df_filtrado["prioridad"] = df_filtrado["score_criticidad"].apply(clasificar_prioridad)
 
@@ -598,10 +639,6 @@ if prioridad_sel:
 if df_filtrado.empty:
     st.warning("No hay datos con los filtros seleccionados.")
     st.stop()
-
-# Recalcular score después de prioridad, para que el total del filtro final mande
-df_filtrado = calcular_score_criticidad(df_filtrado)
-df_filtrado["prioridad"] = df_filtrado["score_criticidad"].apply(clasificar_prioridad)
 
 # =========================================================
 # HEADER
@@ -630,8 +667,8 @@ tabla_cols = [
     "entregas_ok",
     "hl_comprados",
     "hl_rechazados",
-    "hl_suspendidos",
     "pct_rechazo",
+    "pct_suspension",
     "pct_hl_rechazado",
     "frecuencia_semanal",
     "madurez_cliente",
@@ -655,18 +692,45 @@ tabla_vista = (
     .copy()
 )
 
+# Columnas % para mostrar en 0-100
+tabla_vista["pct_rechazo"] = tabla_vista["pct_rechazo"] * 100
+tabla_vista["pct_suspension"] = tabla_vista["pct_suspension"] * 100
+tabla_vista["pct_hl_rechazado"] = tabla_vista["pct_hl_rechazado"] * 100
+
 st.dataframe(
-    tabla_vista.style.format({
-        "score_criticidad": "{:.1f}",
-        "hl_comprados": "{:.2f}",
-        "hl_rechazados": "{:.2f}",
-        "hl_suspendidos": "{:.2f}",
-        "pct_rechazo": "{:.1%}",
-        "pct_hl_rechazado": "{:.1%}",
-        "frecuencia_semanal": "{:.2f}"
-    }),
+    tabla_vista,
     use_container_width=True,
-    height=520
+    height=520,
+    column_config={
+        "score_criticidad": st.column_config.NumberColumn(
+            "Score criticidad",
+            format="%.1f"
+        ),
+        "hl_comprados": st.column_config.NumberColumn(
+            "HL comprados",
+            format="%.2f"
+        ),
+        "hl_rechazados": st.column_config.NumberColumn(
+            "HL rechazados",
+            format="%.2f"
+        ),
+        "pct_rechazo": st.column_config.NumberColumn(
+            "% rechazo",
+            format="%.1f%%"
+        ),
+        "pct_suspension": st.column_config.NumberColumn(
+            "% suspensión",
+            format="%.1f%%"
+        ),
+        "pct_hl_rechazado": st.column_config.NumberColumn(
+            "% HL rechazado",
+            format="%.1f%%"
+        ),
+        "frecuencia_semanal": st.column_config.NumberColumn(
+            "Frecuencia semanal",
+            format="%.2f"
+        ),
+    }
 )
 
 csv = tabla_vista.to_csv(index=False).encode("utf-8-sig")
@@ -685,7 +749,10 @@ st.download_button(
 st.subheader("📊 Resumen Ejecutivo")
 
 clientes_compradores = df_filtrado["cliente"].nunique()
-clientes_rechazadores = df_filtrado.loc[df_filtrado["entregas_rech"] > 0, "cliente"].nunique()
+clientes_rechazadores = df_filtrado.loc[
+    df_filtrado["entregas_rech"] > 0,
+    "cliente"
+].nunique()
 
 entregas_totales = df_filtrado["entregas_totales"].sum()
 entregas_rech = df_filtrado["entregas_rech"].sum()
@@ -694,7 +761,6 @@ entregas_ok = df_filtrado["entregas_ok"].sum()
 
 hl_comprados = df_filtrado["hl_comprados"].sum()
 hl_rechazados = df_filtrado["hl_rechazados"].sum()
-hl_suspendidos = df_filtrado["hl_suspendidos"].sum()
 
 pct_rechazo_total = entregas_rech / max(entregas_totales, 1)
 pct_sus_total = entregas_sus / max(entregas_totales, 1)
@@ -710,16 +776,11 @@ r1c4.metric("Rechazos", f"{int(entregas_rech):,}", f"{pct_rechazo_total:.1%}")
 r1c5.metric("Suspensiones", f"{int(entregas_sus):,}", f"{pct_sus_total:.1%}")
 r1c6.metric("Entregas OK", f"{int(entregas_ok):,}")
 
-r2c1, r2c2, r2c3, r2c4 = st.columns(4)
+r2c1, r2c2, r2c3 = st.columns(3)
 
 r2c1.metric("HL comprados", f"{hl_comprados:,.1f}")
 r2c2.metric("HL rechazados", f"{hl_rechazados:,.1f}", f"{pct_hl_rech_total:.1%}")
-r2c3.metric("HL suspendidos est.", f"{hl_suspendidos:,.1f}")
-r2c4.metric("Frecuencia promedio", f"{freq_prom:.2f}")
-
-st.caption(
-    "Nota: HL suspendidos es estimado porque la tabla actual no trae una columna real de HL suspendidos."
-)
+r2c3.metric("Frecuencia promedio", f"{freq_prom:.2f}")
 
 # =========================================================
 # TOP 10 CLIENTES A INTERVENIR
@@ -750,8 +811,8 @@ else:
     t1, t2, t3, t4 = st.columns(4)
     t1.metric("HL recuperable Top 10", f"{hl_top10:,.1f}")
     t2.metric("Rechazos Top 10", f"{int(rechazos_top10):,}")
-    t3.metric("% HL rechazo del filtro", f"{participacion_hl_top10:.1%}")
-    t4.metric("% rechazos del filtro", f"{participacion_rech_top10:.1%}")
+    t3.metric("% HL rechazo filtro", f"{participacion_hl_top10:.1%}")
+    t4.metric("% rechazos filtro", f"{participacion_rech_top10:.1%}")
 
     top_cols = [
         "cliente",
@@ -771,18 +832,47 @@ else:
         "accion_recomendada"
     ]
 
+    top_vista = top10[top_cols].copy()
+
+    top_vista["pct_rechazo"] = top_vista["pct_rechazo"] * 100
+    top_vista["pct_hl_rechazado"] = top_vista["pct_hl_rechazado"] * 100
+    top_vista["participacion_rechazos"] = top_vista["participacion_rechazos"] * 100
+    top_vista["participacion_hl_rechazado"] = top_vista["participacion_hl_rechazado"] * 100
+
     st.dataframe(
-        top10[top_cols].style.format({
-            "score_criticidad": "{:.1f}",
-            "hl_rechazados": "{:.2f}",
-            "pct_rechazo": "{:.1%}",
-            "pct_hl_rechazado": "{:.1%}",
-            "participacion_rechazos": "{:.1%}",
-            "participacion_hl_rechazado": "{:.1%}",
-            "frecuencia_semanal": "{:.2f}"
-        }),
+        top_vista,
         use_container_width=True,
-        height=360
+        height=360,
+        column_config={
+            "score_criticidad": st.column_config.NumberColumn(
+                "Score",
+                format="%.1f"
+            ),
+            "hl_rechazados": st.column_config.NumberColumn(
+                "HL rechazados",
+                format="%.2f"
+            ),
+            "pct_rechazo": st.column_config.NumberColumn(
+                "% rechazo",
+                format="%.1f%%"
+            ),
+            "pct_hl_rechazado": st.column_config.NumberColumn(
+                "% HL rechazado",
+                format="%.1f%%"
+            ),
+            "participacion_rechazos": st.column_config.NumberColumn(
+                "% rechazos filtro",
+                format="%.1f%%"
+            ),
+            "participacion_hl_rechazado": st.column_config.NumberColumn(
+                "% HL rechazo filtro",
+                format="%.1f%%"
+            ),
+            "frecuencia_semanal": st.column_config.NumberColumn(
+                "Frecuencia semanal",
+                format="%.2f"
+            ),
+        }
     )
 
     # =========================================================
@@ -805,7 +895,6 @@ else:
     # =========================================================
 
     st.subheader("🗺️ Ubicación Top 10 Clientes")
-
     mostrar_mapa_clientes(top10, "Mapa de clientes priorizados")
 
 # =========================================================
@@ -832,7 +921,9 @@ else:
             .head(20)
             .copy()
         )
-        pareto_hl["cliente_label"] = pareto_hl["cliente"] + " - " + pareto_hl["cliente_nombre"]
+        pareto_hl["cliente_label"] = (
+            pareto_hl["cliente"] + " - " + pareto_hl["cliente_nombre"]
+        )
 
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.barh(pareto_hl["cliente_label"], pareto_hl["hl_rechazados"])
@@ -849,7 +940,9 @@ else:
             .head(20)
             .copy()
         )
-        pareto_rech["cliente_label"] = pareto_rech["cliente"] + " - " + pareto_rech["cliente_nombre"]
+        pareto_rech["cliente_label"] = (
+            pareto_rech["cliente"] + " - " + pareto_rech["cliente_nombre"]
+        )
 
         fig, ax = plt.subplots(figsize=(10, 6))
         ax.barh(pareto_rech["cliente_label"], pareto_rech["entregas_rech"])
@@ -915,13 +1008,15 @@ else:
     with g6:
         st.markdown("#### Cantidad de Rechazos vs HL Rechazados")
         fig, ax = plt.subplots(figsize=(10, 5))
-        size = (df_rech["score_criticidad"].clip(lower=5) * 5)
+        size = df_rech["score_criticidad"].clip(lower=5) * 5
+
         ax.scatter(
             df_rech["entregas_rech"],
             df_rech["hl_rechazados"],
             s=size,
             alpha=0.6
         )
+
         ax.set_xlabel("Cantidad de rechazos")
         ax.set_ylabel("HL rechazados")
         st.pyplot(fig)
@@ -995,7 +1090,6 @@ if cliente_sel:
 
             - **HL comprados:** {c['hl_comprados']:.2f}
             - **HL rechazados:** {c['hl_rechazados']:.2f}
-            - **HL suspendidos estimados:** {c['hl_suspendidos']:.2f}
             - **HL entregados estimados:** {c['hl_entregados_estimados']:.2f}
             - **% HL rechazado:** {c['pct_hl_rechazado']:.1%}
 
