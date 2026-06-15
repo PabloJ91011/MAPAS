@@ -393,6 +393,171 @@ def mostrar_glosario():
             "Ejemplo operativo: si la ventana de recepción es NOCHE, pero la ventana de rechazo por local cerrado es TARDE, "
             "la recomendación será validar si conviene mover la entrega hacia la noche."
         )
+        
+    with st.expander("📞 Probabilidad de rechazo para pedidos próximos", expanded=False):
+        st.markdown("""
+        La **probabilidad de rechazo** se usa en la ventana **Pedidos para llamar**.
+
+        Esta medida responde:
+
+        > Si este cliente tiene un pedido programado para mañana o para los próximos días, ¿qué tan probable es que lo rechace?
+
+        ---
+
+        ### Fórmula usada
+
+        No usamos simplemente:
+
+        ```python
+        entregas_rech / entregas_totales
+        ```
+
+        porque eso puede generar falsos críticos.
+
+        Por ejemplo, un cliente con 1 entrega y 1 rechazo tendría:
+
+        ```text
+        1 / 1 = 100%
+        ```
+
+        Pero ese 100% no es tan confiable porque solo tiene una entrega histórica.
+
+        Por eso usamos una fórmula suavizada:
+
+        ```python
+        probabilidad_rechazo = (
+        entregas_rech + tasa_global_rechazo * 5
+        ) / (
+            entregas_totales + 5
+        )
+        ```
+
+        Donde:
+
+        ```python
+        tasa_global_rechazo = total_rechazos_hist / total_entregas_hist
+        ```
+
+        ---
+
+        ### ¿Qué significa el `5`?
+
+        El `5` funciona como una base mínima estadística.
+
+        Es como decir:
+
+        > Si el cliente tiene poco historial, no confío totalmente en su propio porcentaje.  
+        > Entonces mezclo su comportamiento con el promedio general de rechazo.
+
+        Esto evita que clientes con muy pocos pedidos aparezcan como 100% críticos.
+
+        ---
+
+        ### Ejemplo 1: cliente con poco historial
+
+        Supongamos que la tasa global de rechazo es 10%.
+
+        Cliente A:
+
+        ```text
+        Entregas totales = 1
+        Entregas rechazadas = 1
+        ```
+
+        Fórmula simple:
+
+        ```text
+        1 / 1 = 100%
+        ```
+
+        Fórmula suavizada:
+
+        ```text
+        (1 + 10% * 5) / (1 + 5)
+        = (1 + 0.5) / 6
+        = 25%
+        ```
+
+        Resultado:
+
+        ```text
+        Probabilidad de rechazo = 25%
+        ```
+
+        ---
+
+        ### Ejemplo 2: cliente con más historial
+    
+        Cliente B:
+    
+        ```text
+        Entregas totales = 20
+        Entregas rechazadas = 8
+        ```
+    
+        Fórmula simple:
+    
+        ```text
+        8 / 20 = 40%
+        ```
+    
+        Fórmula suavizada:
+    
+        ```text
+        (8 + 10% * 5) / (20 + 5)
+        = (8 + 0.5) / 25
+        = 34%
+        ```
+    
+        Resultado:
+    
+        ```text
+        Probabilidad de rechazo = 34%
+        ```
+    
+        Sigue siendo alto, pero más estable.
+    
+        ---
+    
+        ### Diferencia con el score de criticidad
+    
+        La **probabilidad de rechazo** mide:
+    
+        ```text
+        Qué tan probable es que el cliente rechace.
+        ```
+    
+        El **score de llamada preventiva** mide:
+    
+        ```text
+        A quién conviene llamar primero.
+        ```
+    
+        Por eso el score preventivo combina:
+    
+        | Componente | Peso |
+        |---|---:|
+        | Probabilidad histórica de rechazo | 50% |
+        | Score de criticidad histórico | 25% |
+        | Impacto del HL programado para la fecha | 15% |
+        | % HL rechazado histórico | 10% |
+    
+        Fórmula:
+    
+        ```python
+        score_llamada_preventiva = 100 * (
+            probabilidad_rechazo * 0.50 +
+            score_criticidad / 100 * 0.25 +
+            impacto_hl_programado * 0.15 +
+            pct_hl_rechazado * 0.10
+        )
+        ```
+    
+        En simple:
+    
+        > La probabilidad dice si puede rechazar.  
+        > El score dice si además vale la pena llamarlo primero por impacto operativo.
+        """)
 
     with st.expander("🧮 16. Score de criticidad: cómo se arma exactamente", expanded=True):
         st.markdown("""
@@ -1145,7 +1310,11 @@ def cargar_pedidos_programados():
     for col in text_cols_pedidos:
         if col in pedidos.columns:
             pedidos[col] = pedidos[col].fillna("SIN DATO").astype(str).str.strip()
-
+            
+    if "sts" in pedidos.columns:
+        pedidos["sts"] = pedidos["sts"].fillna("SIN DATO").astype(str).str.upper().str.strip()
+        pedidos = pedidos[pedidos["sts"].isin(["LIB", "RET"])].copy()
+    
     num_cols_pedidos = [
         "hl",
         "bultos",
@@ -1362,7 +1531,7 @@ def construir_base_pedidos_preventiva(pedidos, historico, fecha_objetivo):
     return base, detalle_pedidos
 
 
-def mostrar_pedidos_manana():
+def mostrar_pedidos_manana(historico_filtrado):
     col_titulo, col_boton = st.columns([5, 1])
 
     with col_titulo:
@@ -1383,9 +1552,23 @@ def mostrar_pedidos_manana():
 
     pedidos = cargar_pedidos_programados()
 
-    # Usamos el histórico completo de tu dashboard actual
-    historico = calcular_score_criticidad(df.copy())
-    historico["prioridad"] = historico["score_criticidad"].apply(clasificar_prioridad)
+    # Usamos el histórico ya filtrado por el sidebar del dashboard
+    historico = historico_filtrado.copy()
+
+    # Asegurar score y prioridad si por algún motivo no existen
+    if "score_criticidad" not in historico.columns:
+        historico = calcular_score_criticidad(historico)
+
+    if "prioridad" not in historico.columns:
+        historico["prioridad"] = historico["score_criticidad"].apply(clasificar_prioridad)
+
+    # Aplicar filtros del dashboard también a la tabla de pedidos
+    clientes_filtrados = historico["cliente"].astype(str).unique()
+
+    pedidos = pedidos[
+        pedidos["cliente"].astype(str).isin(clientes_filtrados)
+    ].copy()
+
 
     hoy = datetime.now(ZoneInfo("America/La_Paz")).date()
 
@@ -1413,7 +1596,7 @@ def mostrar_pedidos_manana():
     # Si no, usa N+1.
     default_index = 1 if hoy.weekday() == 5 else 0
 
-    col_f1, col_f2, col_f3 = st.columns([2, 2, 2])
+    col_f1, col_f2 = st.columns([2, 1])
 
     with col_f1:
         opcion_sel = st.selectbox(
@@ -1426,14 +1609,6 @@ def mostrar_pedidos_manana():
     fecha_objetivo = opcion_sel["fecha"]
 
     with col_f2:
-        dps_pedidos = sorted(pedidos["dps"].dropna().unique())
-
-        dps_sel_pedidos = st.multiselect(
-            "Filtrar DPS",
-            options=dps_pedidos
-        )
-
-    with col_f3:
         top_n = st.number_input(
             "Cantidad de clientes a mostrar",
             min_value=5,
@@ -1443,11 +1618,6 @@ def mostrar_pedidos_manana():
         )
 
     pedidos_filtrados = pedidos.copy()
-
-    if dps_sel_pedidos:
-        pedidos_filtrados = pedidos_filtrados[
-            pedidos_filtrados["dps"].isin(dps_sel_pedidos)
-        ]
 
     base_preventiva, detalle_pedidos = construir_base_pedidos_preventiva(
         pedidos_filtrados,
@@ -1473,12 +1643,11 @@ def mostrar_pedidos_manana():
         base_preventiva["prioridad_llamada"].eq("🚨 LLAMAR URGENTE")
     ]["cliente"].nunique()
 
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3 = st.columns(3)
 
     m1.metric("Clientes con pedido", f"{total_clientes:,.0f}")
     m2.metric("Pedidos programados", f"{total_pedidos:,.0f}")
     m3.metric("HL programados", f"{total_hl:,.1f}")
-    m4.metric("Llamar urgente", f"{clientes_urgentes:,.0f}")
 
     st.markdown("### 🚨 Top clientes a llamar preventivamente")
 
@@ -1604,8 +1773,17 @@ def mostrar_pedidos_manana():
 
     st.markdown("### 🧾 Detalle de pedidos de la fecha seleccionada")
 
+    detalle_ordenado = detalle_pedidos.copy()
+
+    orden_cols = [
+        c for c in ["cliente", "cliente_nombre", "nro", "producto_nombre"]
+        if c in detalle_ordenado.columns
+    ]
+
+    detalle_ordenado = detalle_ordenado.sort_values(orden_cols)
+
     st.dataframe(
-        detalle_pedidos[
+        detalle_ordenado[
             [
                 "fecha_entrega",
                 "cliente",
@@ -1653,9 +1831,6 @@ with header_info:
 
 if st.session_state["vista_actual"] == "informacion":
     mostrar_glosario()
-    st.stop()
-if st.session_state["vista_actual"] == "pedidos_manana":
-    mostrar_pedidos_manana()
     st.stop()
 
 ultima_actualizacion = get_last_update()
@@ -1725,10 +1900,16 @@ prioridad_sel = st.sidebar.multiselect(
 
 if prioridad_sel:
     df_filtrado = df_filtrado[df_filtrado["prioridad"].isin(prioridad_sel)]
+    
+if st.session_state["vista_actual"] == "pedidos_manana":
+    mostrar_pedidos_manana(df_filtrado)
+    st.stop()
 
 if df_filtrado.empty:
     st.warning("No hay datos con los filtros seleccionados.")
     st.stop()
+
+
 
 # =========================================================
 # TABLA COMPLETA PRIMERO
