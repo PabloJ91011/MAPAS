@@ -364,17 +364,30 @@ def clasificar_prioridad(score):
 if "vista_actual" not in st.session_state:
     st.session_state["vista_actual"] = "dashboard"
 
+if st.session_state["vista_actual"] not in ["dashboard", "informacion", "pedidos_manana"]:
+    st.session_state["vista_actual"] = "dashboard"
+
+
+def safe_rerun():
+    try:
+        st.rerun()
+    except AttributeError:
+        st.experimental_rerun()
+
 
 def ir_a_informacion():
     st.session_state["vista_actual"] = "informacion"
+    safe_rerun()
 
 
 def ir_a_pedidos_manana():
     st.session_state["vista_actual"] = "pedidos_manana"
+    safe_rerun()
 
 
 def volver_al_dashboard():
     st.session_state["vista_actual"] = "dashboard"
+    safe_rerun()
 
 # =========================================================
 # GLOSARIO COMPACTO
@@ -1735,7 +1748,6 @@ def mostrar_pedidos_manana(historico_filtrado):
     with col_titulo:
         ultima_actualizacion_pedidos = get_last_update_pedidos()
     
-        st.title("📞 Pedidos para llamar")
         st.caption(
             "Cruce preventivo entre pedidos programados y clientes con historial de rechazo. "
             f"Última actualización pedidos: {ultima_actualizacion_pedidos}."
@@ -2133,10 +2145,23 @@ def mostrar_pedidos_manana(historico_filtrado):
 # HEADER CON BOTÓN INFORMACIÓN
 # =========================================================
 
-header_left, header_pedidos, header_info = st.columns([4, 1.4, 1])
+header_left, header_dashboard, header_pedidos, header_info = st.columns([4, 1.1, 1.4, 1])
 
 with header_left:
-    st.title("🚀 Centro de Oportunidades Operativas")
+    if st.session_state["vista_actual"] == "dashboard":
+        st.title("🚀 Centro de Oportunidades Operativas")
+    elif st.session_state["vista_actual"] == "pedidos_manana":
+        st.title("📞 Pedidos para llamar")
+    elif st.session_state["vista_actual"] == "informacion":
+        st.title("📘 Información")
+
+with header_dashboard:
+    st.write("")
+    st.button(
+        "🏠 Dashboard",
+        on_click=volver_al_dashboard,
+        use_container_width=True
+    )
 
 with header_pedidos:
     st.write("")
@@ -2225,15 +2250,19 @@ prioridad_sel = st.sidebar.multiselect(
 
 if prioridad_sel:
     df_filtrado = df_filtrado[df_filtrado["prioridad"].isin(prioridad_sel)]
-    
-if st.session_state["vista_actual"] == "pedidos_manana":
-    mostrar_pedidos_manana(df_filtrado)
-    st.stop()
 
 if df_filtrado.empty:
     st.warning("No hay datos con los filtros seleccionados.")
     st.stop()
 
+# =========================================================
+# VISTA PEDIDOS PARA LLAMAR
+# Se ejecuta después de aplicar los mismos filtros del dashboard
+# =========================================================
+
+if st.session_state["vista_actual"] == "pedidos_manana":
+    mostrar_pedidos_manana(df_filtrado)
+    st.stop()
 
 
 # =========================================================
