@@ -368,26 +368,16 @@ if st.session_state["vista_actual"] not in ["dashboard", "informacion", "pedidos
     st.session_state["vista_actual"] = "dashboard"
 
 
-def safe_rerun():
-    try:
-        st.rerun()
-    except AttributeError:
-        st.experimental_rerun()
-
-
 def ir_a_informacion():
     st.session_state["vista_actual"] = "informacion"
-    safe_rerun()
 
 
 def ir_a_pedidos_manana():
     st.session_state["vista_actual"] = "pedidos_manana"
-    safe_rerun()
 
 
 def volver_al_dashboard():
     st.session_state["vista_actual"] = "dashboard"
-    safe_rerun()
 
 # =========================================================
 # GLOSARIO COMPACTO
