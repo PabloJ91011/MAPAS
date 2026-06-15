@@ -6,7 +6,8 @@ import matplotlib.pyplot as plt
 import html
 from datetime import datetime
 from zoneinfo import ZoneInfo
-
+from datetime import timedelta
+import numpy as np
 # =========================================================
 # CONFIG
 # =========================================================
@@ -18,7 +19,7 @@ st.set_page_config(
 
 CSV_URL = "https://raw.githubusercontent.com/PabloJ91011/MAPAS/main/otif_h3.csv"
 GITHUB_API_COMMITS_URL = "https://api.github.com/repos/PabloJ91011/MAPAS/commits"
-
+PEDIDOS_PROGRAMADOS_URL = "https://raw.githubusercontent.com/PabloJ91011/MAPAS/main/otif_h3_15-06-2026_15h22.csv.gz"
 # =========================================================
 # CARGA DATOS
 # =========================================================
@@ -326,6 +327,10 @@ if "vista_actual" not in st.session_state:
 
 def ir_a_informacion():
     st.session_state["vista_actual"] = "informacion"
+
+
+def ir_a_pedidos_manana():
+    st.session_state["vista_actual"] = "pedidos_manana"
 
 
 def volver_al_dashboard():
@@ -1077,15 +1082,568 @@ def mostrar_mapa_clientes(data, titulo):
     )
 
 # =========================================================
+# PEDIDOS PARA MAÑANA / PRÓXIMOS DÍAS
+# =========================================================
+
+@st.cache_data(ttl=600)
+def cargar_pedidos_programados():
+    pedidos = pd.read_csv(
+        PEDIDOS_PROGRAMADOS_URL,
+        compression="gzip"
+    )
+
+    pedidos.columns = pedidos.columns.str.strip().str.lower()
+
+    pedidos["cliente"] = (
+        pd.to_numeric(pedidos["cliente"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+        .astype(str)
+    )
+
+    pedidos["dps"] = (
+        pd.to_numeric(pedidos["dps"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+        .astype(str)
+    )
+
+    pedidos["nro"] = (
+        pd.to_numeric(pedidos["nro"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+        .astype(str)
+    )
+
+    pedidos["fch_entrega"] = (
+        pedidos["fch_entrega"]
+        .astype(str)
+        .str.replace(".0", "", regex=False)
+        .str.strip()
+    )
+
+    pedidos["fecha_entrega"] = pd.to_datetime(
+        pedidos["fch_entrega"],
+        format="%Y%m%d",
+        errors="coerce"
+    ).dt.date
+
+    text_cols_pedidos = [
+        "cliente_nombre",
+        "cod_desc",
+        "sts",
+        "mot_trn_desc",
+        "producto_nombre",
+        "domicilio",
+        "zona_desc",
+        "region_desc",
+        "gerencia_desc",
+        "trr_desc",
+        "localidad"
+    ]
+
+    for col in text_cols_pedidos:
+        if col in pedidos.columns:
+            pedidos[col] = pedidos[col].fillna("SIN DATO").astype(str).str.strip()
+
+    num_cols_pedidos = [
+        "hl",
+        "bultos",
+        "importe_total",
+        "producto",
+        "planilla"
+    ]
+
+    for col in num_cols_pedidos:
+        if col in pedidos.columns:
+            pedidos[col] = pd.to_numeric(pedidos[col], errors="coerce").fillna(0)
+
+    return pedidos
+
+
+def construir_base_pedidos_preventiva(pedidos, historico, fecha_objetivo):
+    pedidos_fecha = pedidos[
+        pedidos["fecha_entrega"].eq(fecha_objetivo)
+    ].copy()
+
+    if pedidos_fecha.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    # Base detalle por pedido/producto para mostrar abajo
+    detalle_pedidos = pedidos_fecha.copy()
+
+    # Agrupar a nivel cliente para evitar duplicación por SKU
+    pedidos_cliente = (
+        pedidos_fecha
+        .groupby(
+            [
+                "cliente",
+                "cliente_nombre",
+                "dps",
+                "fecha_entrega"
+            ],
+            as_index=False
+        )
+        .agg(
+            pedidos_programados=("nro", "nunique"),
+            lista_pedidos=("nro", lambda x: ", ".join(sorted(x.astype(str).unique()))),
+            hl_programados=("hl", "sum"),
+            bultos_programados=("bultos", "sum"),
+            importe_programado=("importe_total", "sum"),
+            productos_distintos=("producto", "nunique"),
+            estado_pedido=("sts", "first"),
+            zona_desc=("zona_desc", "first"),
+            region_desc=("region_desc", "first"),
+            gerencia_desc=("gerencia_desc", "first"),
+            trr_desc=("trr_desc", "first"),
+            domicilio=("domicilio", "first"),
+            localidad=("localidad", "first")
+        )
+    )
+
+    # Histórico ya viene de tu tabla principal otif_h3.csv
+    hist = historico.copy()
+
+    hist_cols = [
+        "cliente",
+        "entregas_totales",
+        "entregas_rech",
+        "entregas_sus",
+        "entregas_ok",
+        "hl_comprados",
+        "hl_rechazados",
+        "pct_rechazo",
+        "pct_hl_rechazado",
+        "frecuencia_semanal",
+        "motivo_rechazo_principal",
+        "ventana_horaria_recepcion",
+        "ventana_local_cerrado",
+        "accion_recomendada",
+        "tipo_gestion",
+        "score_criticidad",
+        "prioridad"
+    ]
+
+    hist_cols = [c for c in hist_cols if c in hist.columns]
+
+    hist = hist[hist_cols].drop_duplicates("cliente")
+
+    base = pedidos_cliente.merge(
+        hist,
+        on="cliente",
+        how="left"
+    )
+
+    # Completar clientes sin histórico
+    fill_num = [
+        "entregas_totales",
+        "entregas_rech",
+        "entregas_sus",
+        "entregas_ok",
+        "hl_comprados",
+        "hl_rechazados",
+        "pct_rechazo",
+        "pct_hl_rechazado",
+        "frecuencia_semanal",
+        "score_criticidad"
+    ]
+
+    for col in fill_num:
+        if col in base.columns:
+            base[col] = pd.to_numeric(base[col], errors="coerce").fillna(0)
+
+    fill_text = [
+        "motivo_rechazo_principal",
+        "ventana_horaria_recepcion",
+        "ventana_local_cerrado",
+        "accion_recomendada",
+        "tipo_gestion",
+        "prioridad"
+    ]
+
+    for col in fill_text:
+        if col in base.columns:
+            base[col] = base[col].fillna("SIN HISTÓRICO").astype(str)
+
+    # Tasa global histórica para suavizar probabilidad
+    total_entregas_hist = max(historico["entregas_totales"].sum(), 1)
+    total_rechazos_hist = historico["entregas_rech"].sum()
+
+    tasa_global_rechazo = total_rechazos_hist / total_entregas_hist
+
+    # Probabilidad suavizada:
+    # Evita que un cliente con 1 entrega y 1 rechazo salga automáticamente como 100%
+    base["probabilidad_rechazo"] = (
+        base["entregas_rech"] + tasa_global_rechazo * 5
+    ) / (
+        base["entregas_totales"] + 5
+    )
+
+    base["probabilidad_rechazo_pct"] = (
+        base["probabilidad_rechazo"] * 100
+    ).round(1)
+
+    # Impacto del pedido del día seleccionado
+    max_hl_programado = base["hl_programados"].max()
+
+    base["impacto_hl_programado"] = np.where(
+        max_hl_programado > 0,
+        base["hl_programados"] / max_hl_programado,
+        0
+    )
+
+    # Score preventivo:
+    # 50% probabilidad histórica de rechazo
+    # 25% score de criticidad histórico
+    # 15% impacto del HL programado para esa fecha
+    # 10% % HL rechazado histórico
+    base["score_llamada_preventiva"] = 100 * (
+        base["probabilidad_rechazo"] * 0.50 +
+        (base["score_criticidad"] / 100) * 0.25 +
+        base["impacto_hl_programado"] * 0.15 +
+        base["pct_hl_rechazado"].clip(0, 1) * 0.10
+    )
+
+    base["score_llamada_preventiva"] = base["score_llamada_preventiva"].round(1)
+
+    base["prioridad_llamada"] = np.select(
+        [
+            base["score_llamada_preventiva"] >= 70,
+            base["score_llamada_preventiva"] >= 50,
+            base["score_llamada_preventiva"] >= 30
+        ],
+        [
+            "🚨 LLAMAR URGENTE",
+            "🟠 RIESGO ALTO",
+            "🟡 MONITOREAR"
+        ],
+        default="🟢 BAJO"
+    )
+
+    def accion_preventiva(row):
+        motivo = str(row.get("motivo_rechazo_principal", "")).upper()
+        ventana_ok = str(row.get("ventana_horaria_recepcion", "SIN DATO"))
+        ventana_cerrado = str(row.get("ventana_local_cerrado", "SIN DATO"))
+
+        if "LOCAL CERRADO" in motivo:
+            return (
+                f"Llamar y confirmar horario de apertura. "
+                f"Recepción habitual: {ventana_ok}. "
+                f"Riesgo por local cerrado: {ventana_cerrado}."
+            )
+
+        if "DINERO" in motivo:
+            return "Llamar y confirmar disponibilidad de pago antes del despacho."
+
+        if "NO RECIBE" in motivo or "RECHAZA" in motivo:
+            return "Llamar y confirmar voluntad de recibir el pedido."
+
+        if "NO UBICADO" in motivo or "DIRECCION" in motivo or "DIRECCIÓN" in motivo:
+            return "Validar dirección, referencia y ubicación antes de salir a ruta."
+
+        if "MAL PEDIDO" in motivo or "PEDIDO" in motivo:
+            return "Validar productos y cantidades con el cliente o ventas."
+
+        if row["score_llamada_preventiva"] >= 70:
+            return "Llamar antes de cargar o despachar por alto riesgo operativo."
+
+        if row["score_llamada_preventiva"] >= 50:
+            return "Realizar contacto preventivo para confirmar recepción."
+
+        return "Monitorear. Contactar solo si hay capacidad operativa."
+
+    base["accion_preventiva"] = base.apply(accion_preventiva, axis=1)
+
+    base = base.sort_values(
+        "score_llamada_preventiva",
+        ascending=False
+    ).reset_index(drop=True)
+
+    return base, detalle_pedidos
+
+
+def mostrar_pedidos_manana():
+    col_titulo, col_boton = st.columns([5, 1])
+
+    with col_titulo:
+        st.title("📞 Pedidos para llamar")
+        st.caption(
+            "Cruce preventivo entre pedidos programados y clientes con historial de rechazo."
+        )
+
+    with col_boton:
+        st.write("")
+        st.button(
+            "⬅️ Volver",
+            on_click=volver_al_dashboard,
+            use_container_width=True
+        )
+
+    st.divider()
+
+    pedidos = cargar_pedidos_programados()
+
+    # Usamos el histórico completo de tu dashboard actual
+    historico = calcular_score_criticidad(df.copy())
+    historico["prioridad"] = historico["score_criticidad"].apply(clasificar_prioridad)
+
+    hoy = datetime.now(ZoneInfo("America/La_Paz")).date()
+
+    opciones = []
+
+    for n in range(1, 8):
+        fecha = hoy + timedelta(days=n)
+
+        # Regla: si hoy es sábado, no proponer domingo como default operativo
+        if hoy.weekday() == 5 and n == 1:
+            etiqueta = f"N+{n} - {fecha.strftime('%d/%m/%Y')} - Domingo sin atención"
+        else:
+            etiqueta = f"N+{n} - {fecha.strftime('%d/%m/%Y')}"
+
+        opciones.append(
+            {
+                "n": n,
+                "fecha": fecha,
+                "etiqueta": etiqueta
+            }
+        )
+
+    # Default:
+    # Si hoy es sábado, usa N+2.
+    # Si no, usa N+1.
+    default_index = 1 if hoy.weekday() == 5 else 0
+
+    col_f1, col_f2, col_f3 = st.columns([2, 2, 2])
+
+    with col_f1:
+        opcion_sel = st.selectbox(
+            "Fecha de entrega a evaluar",
+            options=opciones,
+            index=default_index,
+            format_func=lambda x: x["etiqueta"]
+        )
+
+    fecha_objetivo = opcion_sel["fecha"]
+
+    with col_f2:
+        dps_pedidos = sorted(pedidos["dps"].dropna().unique())
+
+        dps_sel_pedidos = st.multiselect(
+            "Filtrar DPS",
+            options=dps_pedidos
+        )
+
+    with col_f3:
+        top_n = st.number_input(
+            "Cantidad de clientes a mostrar",
+            min_value=5,
+            max_value=50,
+            value=10,
+            step=5
+        )
+
+    pedidos_filtrados = pedidos.copy()
+
+    if dps_sel_pedidos:
+        pedidos_filtrados = pedidos_filtrados[
+            pedidos_filtrados["dps"].isin(dps_sel_pedidos)
+        ]
+
+    base_preventiva, detalle_pedidos = construir_base_pedidos_preventiva(
+        pedidos_filtrados,
+        historico,
+        fecha_objetivo
+    )
+
+    st.caption(f"Fecha evaluada: **{fecha_objetivo.strftime('%d/%m/%Y')}**")
+
+    if fecha_objetivo.weekday() == 6:
+        st.warning(
+            "La fecha seleccionada cae domingo. Según la regla operativa, si hoy es sábado se recomienda usar N+2."
+        )
+
+    if base_preventiva.empty:
+        st.info("No hay pedidos programados para la fecha seleccionada.")
+        return
+
+    total_clientes = base_preventiva["cliente"].nunique()
+    total_pedidos = base_preventiva["pedidos_programados"].sum()
+    total_hl = base_preventiva["hl_programados"].sum()
+    clientes_urgentes = base_preventiva[
+        base_preventiva["prioridad_llamada"].eq("🚨 LLAMAR URGENTE")
+    ]["cliente"].nunique()
+
+    m1, m2, m3, m4 = st.columns(4)
+
+    m1.metric("Clientes con pedido", f"{total_clientes:,.0f}")
+    m2.metric("Pedidos programados", f"{total_pedidos:,.0f}")
+    m3.metric("HL programados", f"{total_hl:,.1f}")
+    m4.metric("Llamar urgente", f"{clientes_urgentes:,.0f}")
+
+    st.markdown("### 🚨 Top clientes a llamar preventivamente")
+
+    top_preventivo = base_preventiva.head(int(top_n)).copy()
+
+    tabla_top = top_preventivo[
+        [
+            "prioridad_llamada",
+            "score_llamada_preventiva",
+            "probabilidad_rechazo_pct",
+            "cliente",
+            "cliente_nombre",
+            "dps",
+            "pedidos_programados",
+            "lista_pedidos",
+            "hl_programados",
+            "entregas_totales",
+            "entregas_rech",
+            "hl_rechazados",
+            "motivo_rechazo_principal",
+            "accion_preventiva"
+        ]
+    ].copy()
+
+    st.dataframe(
+        tabla_top,
+        use_container_width=True,
+        height=360,
+        hide_index=True,
+        column_config={
+            "score_llamada_preventiva": st.column_config.NumberColumn(
+                "Score llamada",
+                format="%.1f"
+            ),
+            "probabilidad_rechazo_pct": st.column_config.NumberColumn(
+                "Prob. rechazo",
+                format="%.1f%%"
+            ),
+            "hl_programados": st.column_config.NumberColumn(
+                "HL programados",
+                format="%.2f"
+            ),
+            "hl_rechazados": st.column_config.NumberColumn(
+                "HL rechazados hist.",
+                format="%.2f"
+            )
+        }
+    )
+
+    st.markdown("### 📱 Vista móvil de llamadas")
+
+    for _, row in top_preventivo.iterrows():
+        with st.container(border=True):
+            st.markdown(f"""
+### {row['prioridad_llamada']} | {row['cliente']} - {row['cliente_nombre']}
+
+**Score llamada:** {row['score_llamada_preventiva']:.1f}  
+**Probabilidad rechazo:** {row['probabilidad_rechazo_pct']:.1f}%  
+**DPS:** {row['dps']}  
+**Pedidos:** {row['pedidos_programados']}  
+**Nros pedido:** {row['lista_pedidos']}  
+**HL programados:** {row['hl_programados']:.2f}  
+**Histórico:** {int(row['entregas_rech'])} rechazos de {int(row['entregas_totales'])} entregas  
+**HL rechazados histórico:** {row['hl_rechazados']:.2f}  
+**Motivo principal:** {row['motivo_rechazo_principal']}  
+**Ventana recepción:** {row['ventana_horaria_recepcion']}  
+**Ventana local cerrado:** {row['ventana_local_cerrado']}  
+
+👉 **Acción:** {row['accion_preventiva']}  
+
+**Zona:** {row.get('zona_desc', 'SIN DATO')}  
+**Dirección:** {row.get('domicilio', 'SIN DATO')}
+            """)
+
+    st.markdown("### 📋 Lista completa preventiva")
+
+    prioridad_sel = st.multiselect(
+        "Filtrar prioridad llamada",
+        options=base_preventiva["prioridad_llamada"].dropna().unique(),
+        default=base_preventiva["prioridad_llamada"].dropna().unique()
+    )
+
+    base_filtrada = base_preventiva[
+        base_preventiva["prioridad_llamada"].isin(prioridad_sel)
+    ].copy()
+
+    st.dataframe(
+        base_filtrada[
+            [
+                "prioridad_llamada",
+                "score_llamada_preventiva",
+                "probabilidad_rechazo_pct",
+                "cliente",
+                "cliente_nombre",
+                "dps",
+                "pedidos_programados",
+                "lista_pedidos",
+                "hl_programados",
+                "bultos_programados",
+                "importe_programado",
+                "entregas_totales",
+                "entregas_rech",
+                "hl_rechazados",
+                "motivo_rechazo_principal",
+                "accion_preventiva",
+                "zona_desc",
+                "domicilio"
+            ]
+        ],
+        use_container_width=True,
+        height=480,
+        hide_index=True
+    )
+
+    csv_preventivo = base_filtrada.to_csv(index=False).encode("utf-8-sig")
+
+    st.download_button(
+        "📥 Descargar lista preventiva CSV",
+        csv_preventivo,
+        f"pedidos_preventivos_{fecha_objetivo}.csv",
+        "text/csv"
+    )
+
+    st.markdown("### 🧾 Detalle de pedidos de la fecha seleccionada")
+
+    st.dataframe(
+        detalle_pedidos[
+            [
+                "fecha_entrega",
+                "cliente",
+                "cliente_nombre",
+                "dps",
+                "nro",
+                "sts",
+                "producto",
+                "producto_nombre",
+                "bultos",
+                "hl",
+                "importe_total",
+                "zona_desc",
+                "domicilio"
+            ]
+        ],
+        use_container_width=True,
+        height=420,
+        hide_index=True
+    )
+# =========================================================
 # HEADER CON BOTÓN INFORMACIÓN
 # =========================================================
 
-header_left, header_right = st.columns([5, 1])
+header_left, header_pedidos, header_info = st.columns([4, 1.4, 1])
 
 with header_left:
     st.title("🚀 Centro de Oportunidades Operativas")
 
-with header_right:
+with header_pedidos:
+    st.write("")
+    st.button(
+        "📞 Pedidos",
+        on_click=ir_a_pedidos_manana,
+        use_container_width=True
+    )
+
+with header_info:
     st.write("")
     st.button(
         "ℹ️ Información",
@@ -1095,6 +1653,9 @@ with header_right:
 
 if st.session_state["vista_actual"] == "informacion":
     mostrar_glosario()
+    st.stop()
+if st.session_state["vista_actual"] == "pedidos_manana":
+    mostrar_pedidos_manana()
     st.stop()
 
 ultima_actualizacion = get_last_update()
