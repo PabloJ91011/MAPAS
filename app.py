@@ -1752,7 +1752,7 @@ def mostrar_tabla_gestion(
     key_base,
     column_config_extra=None,
     height=360,
-    fecha_referencia=""
+    fecha_referencia="",
     detalle_pedidos=None
 ):
     tabla = anexar_estado_gestion(
@@ -1839,7 +1839,7 @@ def mostrar_tabla_gestion(
                             row=row,
                             file_key=file_key,
                             origen=origen,
-                            accion="ATENDIDO"
+                            accion="ATENDIDO",
                             fecha_referencia=fecha_referencia
                         )
                         st.success("Cliente guardado como ATENDIDO.")
@@ -1856,7 +1856,7 @@ def mostrar_tabla_gestion(
                         row=row,
                         file_key=file_key,
                         origen=origen,
-                        accion="RECOMUNICACION"
+                        accion="RECOMUNICACION",
                         fecha_referencia=fecha_referencia
                     )
                     st.success("Cliente guardado como RECOMUNICACION.")
