@@ -4,10 +4,11 @@ import requests
 from io import StringIO
 import matplotlib.pyplot as plt
 import html
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
-from datetime import timedelta
 import numpy as np
+import base64
+from io import BytesIO
 # =========================================================
 # CONFIG
 # =========================================================
@@ -19,6 +20,10 @@ st.set_page_config(
 
 CSV_URL = "https://raw.githubusercontent.com/PabloJ91011/MAPAS/main/otif_h3.csv"
 GITHUB_API_COMMITS_URL = "https://api.github.com/repos/PabloJ91011/MAPAS/commits"
+GITHUB_REPO = "PabloJ91011/MAPAS"
+GITHUB_BRANCH = "main"
+ATENDIDOS_FILE_PATH = "clientes_atendidos.csv"
+GITHUB_CONTENTS_URL = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{ATENDIDOS_FILE_PATH}"
 PEDIDOS_PROGRAMADOS_URL = "https://raw.githubusercontent.com/PabloJ91011/MAPAS/main/otif_h3_15-06-2026_15h22.csv.gz"
 PEDIDOS_PROGRAMADOS_FILENAME = "otif_h3_15-06-2026_15h22.csv.gz"
 # =========================================================
@@ -1288,7 +1293,208 @@ def mostrar_mapa_clientes(data, titulo):
             ),
         }
     )
+# =========================================================
+# GUARDAR CLIENTES ATENDIDOS EN GITHUB
+# =========================================================
 
+def leer_csv_atendidos_github():
+    token = st.secrets.get("GITHUB_TOKEN", None)
+
+    if not token:
+        st.error("No existe GITHUB_TOKEN en Streamlit Secrets.")
+        st.stop()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "streamlit-otif-dashboard"
+    }
+
+    params = {
+        "ref": GITHUB_BRANCH
+    }
+
+    r = requests.get(
+        GITHUB_CONTENTS_URL,
+        headers=headers,
+        params=params,
+        timeout=20
+    )
+
+    columnas = [
+        "fecha_click",
+        "cliente",
+        "cliente_nombre",
+        "dps",
+        "origen"
+    ]
+
+    if r.status_code == 404:
+        return pd.DataFrame(columns=columnas), None
+
+    r.raise_for_status()
+
+    data = r.json()
+    sha = data["sha"]
+
+    contenido_base64 = data["content"]
+    contenido_bytes = base64.b64decode(contenido_base64)
+
+    df_existente = pd.read_csv(BytesIO(contenido_bytes))
+
+    for col in columnas:
+        if col not in df_existente.columns:
+            df_existente[col] = ""
+
+    df_existente = df_existente[columnas]
+
+    return df_existente, sha
+
+
+def guardar_csv_atendidos_github(df_nuevo):
+    token = st.secrets.get("GITHUB_TOKEN", None)
+
+    if not token:
+        st.error("No existe GITHUB_TOKEN en Streamlit Secrets.")
+        st.stop()
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "streamlit-otif-dashboard"
+    }
+
+    df_existente, sha = leer_csv_atendidos_github()
+
+    columnas = [
+        "fecha_click",
+        "cliente",
+        "cliente_nombre",
+        "dps",
+        "origen"
+    ]
+
+    for col in columnas:
+        if col not in df_nuevo.columns:
+            df_nuevo[col] = ""
+
+    df_nuevo = df_nuevo[columnas]
+
+    df_final = pd.concat(
+        [df_existente, df_nuevo],
+        ignore_index=True
+    )
+
+    df_final = df_final.drop_duplicates(
+        subset=[
+            "fecha_click",
+            "cliente",
+            "cliente_nombre",
+            "dps",
+            "origen"
+        ]
+    )
+
+    csv_texto = df_final.to_csv(index=False, encoding="utf-8-sig")
+    csv_base64 = base64.b64encode(
+        csv_texto.encode("utf-8-sig")
+    ).decode("utf-8")
+
+    payload = {
+        "message": "Actualizar clientes atendidos desde Streamlit",
+        "content": csv_base64,
+        "branch": GITHUB_BRANCH
+    }
+
+    if sha:
+        payload["sha"] = sha
+
+    r = requests.put(
+        GITHUB_CONTENTS_URL,
+        headers=headers,
+        json=payload,
+        timeout=20
+    )
+
+    if r.status_code not in [200, 201]:
+        st.error("No se pudo actualizar el archivo de clientes atendidos.")
+        st.write(r.status_code)
+        st.write(r.text)
+        st.stop()
+
+    return True
+
+
+def mostrar_tabla_atendidos(data, origen, key_tabla, column_config_extra=None):
+    """
+    Tabla reutilizable con checkbox de atendido.
+    Sirve para Top 10 Dashboard y Top 10 Ventana de Llamadas.
+    """
+
+    tabla_editor = data.copy()
+
+    if "atendido" not in tabla_editor.columns:
+        tabla_editor.insert(0, "atendido", False)
+
+    columnas_bloqueadas = [
+        col for col in tabla_editor.columns
+        if col != "atendido"
+    ]
+
+    column_config_base = {
+        "atendido": st.column_config.CheckboxColumn(
+            "Atendido",
+            help="Marca los clientes que ya fueron gestionados.",
+            default=False
+        )
+    }
+
+    if column_config_extra:
+        column_config_base.update(column_config_extra)
+
+    tabla_editada = st.data_editor(
+        tabla_editor,
+        use_container_width=True,
+        height=360,
+        hide_index=True,
+        column_config=column_config_base,
+        disabled=columnas_bloqueadas,
+        key=key_tabla
+    )
+
+    seleccionados = tabla_editada[
+        tabla_editada["atendido"] == True
+    ].copy()
+
+    if seleccionados.empty:
+        st.info("Marca uno o más clientes como atendidos para poder guardarlos.")
+        return
+
+    st.success(f"Clientes marcados como atendidos: {len(seleccionados)}")
+
+    if st.button(
+        "💾 Guardar clientes atendidos",
+        use_container_width=True,
+        key=f"guardar_{key_tabla}"
+    ):
+        fecha_click = datetime.now(
+            timezone(timedelta(hours=-4))
+        ).strftime("%d/%m/%Y %H:%M:%S")
+
+        df_guardar = seleccionados[
+            [
+                "cliente",
+                "cliente_nombre",
+                "dps"
+            ]
+        ].copy()
+
+        df_guardar.insert(0, "fecha_click", fecha_click)
+        df_guardar["origen"] = origen
+
+        guardar_csv_atendidos_github(df_guardar)
+
+        st.success("Clientes atendidos guardados correctamente.")
 # =========================================================
 # PEDIDOS PARA MAÑANA / PRÓXIMOS DÍAS
 # =========================================================
@@ -1999,12 +2205,11 @@ def mostrar_pedidos_manana(historico_filtrado):
         ]
     ].copy()
 
-    st.dataframe(
-        tabla_top,
-        use_container_width=True,
-        height=360,
-        hide_index=True,
-        column_config={
+    mostrar_tabla_atendidos(
+        data=tabla_top,
+        origen="Top 10 Ventana de Llamadas",
+        key_tabla=f"top10_llamadas_{fecha_objetivo}_{top_n}",
+        column_config_extra={
             "score_llamada_preventiva": st.column_config.NumberColumn(
                 "Score llamada",
                 format="%.1f"
@@ -2542,11 +2747,11 @@ else:
         top_vista["participacion_rechazos"] = top_vista["participacion_rechazos"] * 100
         top_vista["participacion_hl_rechazado"] = top_vista["participacion_hl_rechazado"] * 100
 
-        st.dataframe(
-            top_vista,
-            use_container_width=True,
-            height=360,
-            column_config={
+        mostrar_tabla_atendidos(
+            data=top_vista,
+            origen="Top 10 Dashboard",
+            key_tabla=f"top10_dashboard_{clientes_a_saltar}",
+            column_config_extra={
                 "score_criticidad": st.column_config.NumberColumn(
                     "Score",
                     format="%.1f"
@@ -2577,6 +2782,7 @@ else:
                 ),
             }
         )
+      
 
         st.subheader("🧠 Plan de Acción para Clientes Priorizados")
 
