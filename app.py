@@ -1357,11 +1357,12 @@ COLUMNAS_GESTION = [
     "dps",
     "usuario",
     "accion",
-    "origen"
+    "origen",
+    "fecha_referencia"
 ]
 
 
-def normalizar_cliente_dps_para_match(data):
+def normalizar_cliente_dps_para_match(data, file_key=None):
     base = data.copy()
 
     base["cliente"] = (
@@ -1378,7 +1379,25 @@ def normalizar_cliente_dps_para_match(data):
         .astype(str)
     )
 
-    base["clave_gestion"] = base["cliente"] + "|" + base["dps"]
+    if "fecha_referencia" not in base.columns:
+        base["fecha_referencia"] = ""
+
+    base["fecha_referencia"] = (
+        base["fecha_referencia"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    # Solo en Pedidos para llamar usamos la fecha como parte de la clave.
+    if file_key == "llamadas":
+        base["clave_gestion"] = (
+            base["cliente"] + "|" +
+            base["dps"] + "|" +
+            base["fecha_referencia"]
+        )
+    else:
+        base["clave_gestion"] = base["cliente"] + "|" + base["dps"]
 
     return base
 
@@ -1513,7 +1532,7 @@ def obtener_estado_gestion(file_key):
             ]
         )
 
-    df_gestion = normalizar_cliente_dps_para_match(df_gestion)
+    df_gestion = normalizar_cliente_dps_para_match(df_gestion, file_key=file_key)
 
     df_gestion["fecha_click_dt"] = pd.to_datetime(
         df_gestion["fecha_click"],
@@ -1539,12 +1558,24 @@ def obtener_estado_gestion(file_key):
         .copy()
     )
 
-    conteos = (
-        df_gestion
-        .groupby("clave_gestion", as_index=False)
-        .size()
-        .rename(columns={"size": "cantidad_clicks"})
-    )
+    df_gestion_atendidos = df_gestion[
+        df_gestion["accion"].eq("ATENDIDO")
+    ].copy()
+    
+    if df_gestion_atendidos.empty:
+        conteos = pd.DataFrame(
+            columns=[
+                "clave_gestion",
+                "cantidad_clicks"
+            ]
+        )
+    else:
+        conteos = (
+            df_gestion_atendidos
+            .groupby("clave_gestion", as_index=False)
+            .size()
+            .rename(columns={"size": "cantidad_clicks"})
+        )
 
     estado = ultimos[
         [
@@ -1570,9 +1601,15 @@ def obtener_estado_gestion(file_key):
     return estado
 
 
-def anexar_estado_gestion(data, file_key):
+def anexar_estado_gestion(data, file_key, fecha_referencia=""):
     base = data.copy()
-    base = normalizar_cliente_dps_para_match(base)
+
+    if file_key == "llamadas":
+        base["fecha_referencia"] = str(fecha_referencia)
+    else:
+        base["fecha_referencia"] = ""
+
+    base = normalizar_cliente_dps_para_match(base, file_key=file_key)
 
     estado = obtener_estado_gestion(file_key)
 
@@ -1607,7 +1644,7 @@ def anexar_estado_gestion(data, file_key):
     return base
 
 
-def registrar_accion_gestion(row, file_key, origen, accion):
+def registrar_accion_gestion(row, file_key, origen, accion, fecha_referencia=""):
     usuario = st.session_state.get("usuario_gestion", "")
     usuario = str(usuario).strip()
 
@@ -1627,23 +1664,102 @@ def registrar_accion_gestion(row, file_key, origen, accion):
                 "dps": row["dps"],
                 "usuario": usuario,
                 "accion": accion,
-                "origen": origen
+                "origen": origen,
+                "fecha_referencia": str(fecha_referencia)
             }
         ]
     )
 
     guardar_csv_gestion_github(df_nuevo, file_key)
 
+def obtener_detalle_skus_cliente(detalle_pedidos, cliente, dps):
+    if detalle_pedidos is None or detalle_pedidos.empty:
+        return pd.DataFrame()
 
+    detalle = detalle_pedidos.copy()
+
+    detalle["cliente"] = (
+        pd.to_numeric(detalle["cliente"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+        .astype(str)
+    )
+
+    detalle["dps"] = (
+        pd.to_numeric(detalle["dps"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+        .astype(str)
+    )
+
+    cliente = str(int(float(cliente))) if str(cliente).replace(".", "", 1).isdigit() else str(cliente)
+    dps = str(int(float(dps))) if str(dps).replace(".", "", 1).isdigit() else str(dps)
+
+    detalle = detalle[
+        (detalle["cliente"].eq(cliente)) &
+        (detalle["dps"].eq(dps))
+    ].copy()
+
+    if detalle.empty:
+        return pd.DataFrame()
+
+    for col in ["producto", "producto_nombre", "nro"]:
+        if col not in detalle.columns:
+            detalle[col] = "SIN DATO"
+
+    for col in ["bultos", "hl"]:
+        if col not in detalle.columns:
+            detalle[col] = 0
+
+        detalle[col] = pd.to_numeric(
+            detalle[col],
+            errors="coerce"
+        ).fillna(0)
+
+    detalle_sku = (
+        detalle
+        .groupby(
+            [
+                "producto",
+                "producto_nombre"
+            ],
+            as_index=False
+        )
+        .agg(
+            pedidos=("nro", lambda x: ", ".join(sorted(x.astype(str).unique()))),
+            cantidad_bultos=("bultos", "sum"),
+            hl=("hl", "sum")
+        )
+        .sort_values("hl", ascending=False)
+    )
+
+    detalle_sku = detalle_sku.rename(
+        columns={
+            "producto": "Código SKU",
+            "producto_nombre": "Nombre SKU",
+            "pedidos": "Pedidos",
+            "cantidad_bultos": "Cantidad/Bultos",
+            "hl": "HL"
+        }
+    )
+
+    return detalle_sku
+    
 def mostrar_tabla_gestion(
     data,
     origen,
     file_key,
     key_base,
     column_config_extra=None,
-    height=360
+    height=360,
+    fecha_referencia=""
+    detalle_pedidos=None
 ):
-    tabla = anexar_estado_gestion(data, file_key)
+    tabla = anexar_estado_gestion(
+        data,
+        file_key,
+        fecha_referencia=fecha_referencia
+    )
 
     columnas_prioridad = [
         "estado_gestion",
@@ -1666,7 +1782,7 @@ def mostrar_tabla_gestion(
         "ultima_fecha_click": st.column_config.TextColumn("Última fecha click"),
         "ultimo_usuario": st.column_config.TextColumn("Último usuario"),
         "cantidad_clicks": st.column_config.NumberColumn(
-            "Cantidad clicks",
+            "Cantidad atendidos",
             format="%d"
         )
     }
@@ -1694,11 +1810,14 @@ def mostrar_tabla_gestion(
             c_info, c_atendido, c_recom = st.columns([4, 1.3, 1.5])
 
             with c_info:
+                ventana_recomendada = row.get("ventana_horaria_recepcion", "SIN DATO")
+            
                 st.markdown(
                     f"""
                     **{row['cliente']} - {row['cliente_nombre']}**  
                     DPS: **{row['dps']}** | Estado: **{row['estado_gestion']}**  
-                    Última fecha: **{row['ultima_fecha_click']}** | Usuario: **{row['ultimo_usuario']}** | Clicks: **{row['cantidad_clicks']}**
+                    Última fecha: **{row['ultima_fecha_click']}** | Usuario: **{row['ultimo_usuario']}** | Atendidos: **{row['cantidad_clicks']}**  
+                    Ventana recomendada: **{ventana_recomendada}**
                     """
                 )
 
@@ -1721,6 +1840,7 @@ def mostrar_tabla_gestion(
                             file_key=file_key,
                             origen=origen,
                             accion="ATENDIDO"
+                            fecha_referencia=fecha_referencia
                         )
                         st.success("Cliente guardado como ATENDIDO.")
                         st.rerun()
@@ -1737,9 +1857,36 @@ def mostrar_tabla_gestion(
                         file_key=file_key,
                         origen=origen,
                         accion="RECOMUNICACION"
+                        fecha_referencia=fecha_referencia
                     )
                     st.success("Cliente guardado como RECOMUNICACION.")
                     st.rerun()
+            if file_key == "llamadas":
+                detalle_sku = obtener_detalle_skus_cliente(
+                    detalle_pedidos=detalle_pedidos,
+                    cliente=row["cliente"],
+                    dps=row["dps"]
+                )
+
+                if not detalle_sku.empty:
+                    with st.expander("📦 Ver detalle del pedido del día seleccionado", expanded=False):
+                        st.dataframe(
+                            detalle_sku,
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "Cantidad/Bultos": st.column_config.NumberColumn(
+                                    "Cantidad/Bultos",
+                                    format="%.2f"
+                                ),
+                                "HL": st.column_config.NumberColumn(
+                                    "HL",
+                                    format="%.2f"
+                                )
+                            }
+                        )
+                else:
+                    st.caption("Sin detalle de SKUs para este cliente en la fecha seleccionada.")
 # =========================================================
 # PEDIDOS PARA MAÑANA / PRÓXIMOS DÍAS
 # =========================================================
@@ -2331,24 +2478,30 @@ def mostrar_pedidos_manana(historico_filtrado):
                 f"de {len(ranking_preventivo)}."
             )
 
-            tabla_top = top_preventivo[
-                [
-                    "prioridad_llamada",
-                    "score_llamada_preventiva",
-                    "probabilidad_rechazo_pct",
-                    "cliente",
-                    "cliente_nombre",
-                    "dps",
-                    "pedidos_programados",
-                    "lista_pedidos",
-                    "hl_programados",
-                    "entregas_totales",
-                    "entregas_rech",
-                    "hl_rechazados",
-                    "motivo_rechazo_principal",
-                    "accion_preventiva"
-                ]
-            ].copy()
+            cols_tabla_top = [
+                "prioridad_llamada",
+                "score_llamada_preventiva",
+                "probabilidad_rechazo_pct",
+                "cliente",
+                "cliente_nombre",
+                "dps",
+                "pedidos_programados",
+                "lista_pedidos",
+                "hl_programados",
+                "entregas_totales",
+                "entregas_rech",
+                "hl_rechazados",
+                "motivo_rechazo_principal",
+                "ventana_horaria_recepcion",
+                "accion_preventiva"
+            ]
+            
+            cols_tabla_top = [
+                c for c in cols_tabla_top
+                if c in top_preventivo.columns
+            ]
+            
+            tabla_top = top_preventivo[cols_tabla_top].copy()
 
             mostrar_tabla_gestion(
                 data=tabla_top,
@@ -2371,8 +2524,13 @@ def mostrar_pedidos_manana(historico_filtrado):
                     "hl_rechazados": st.column_config.NumberColumn(
                         "HL rechazados hist.",
                         format="%.2f"
+                    ),
+                    "ventana_horaria_recepcion": st.column_config.TextColumn(
+                        "Ventana recomendada"
                     )
-                }
+                },
+                fecha_referencia=fecha_objetivo.strftime("%Y-%m-%d"),
+                detalle_pedidos=detalle_pedidos
             )
 
             st.markdown("### 📱 Vista móvil de llamadas")
