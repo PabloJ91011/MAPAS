@@ -14,7 +14,7 @@ from io import BytesIO
 # =========================================================
 
 st.set_page_config(
-    page_title="Centro de Oportunidades Operativas",
+    page_title="PROYECTO FENIX",
     layout="wide"
 )
 
@@ -22,8 +22,15 @@ CSV_URL = "https://raw.githubusercontent.com/PabloJ91011/MAPAS/main/otif_h3.csv"
 GITHUB_API_COMMITS_URL = "https://api.github.com/repos/PabloJ91011/MAPAS/commits"
 GITHUB_REPO = "PabloJ91011/MAPAS"
 GITHUB_BRANCH = "main"
-ATENDIDOS_FILE_PATH = "clientes_atendidos.csv"
-GITHUB_CONTENTS_URL = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{ATENDIDOS_FILE_PATH}"
+GESTION_FILES = {
+    "dashboard": "gestion_top10_dashboard.csv",
+    "llamadas": "gestion_top10_llamadas.csv",
+    "buffer": "gestion_comunicar_buffer.csv"
+}
+
+
+def github_contents_url(file_path):
+    return f"https://api.github.com/repos/{GITHUB_REPO}/contents/{file_path}"
 PEDIDOS_PROGRAMADOS_URL = "https://raw.githubusercontent.com/PabloJ91011/MAPAS/main/otif_h3_15-06-2026_15h22.csv.gz"
 PEDIDOS_PROGRAMADOS_FILENAME = "otif_h3_15-06-2026_15h22.csv.gz"
 # =========================================================
@@ -605,6 +612,51 @@ def mostrar_glosario():
     
         > La probabilidad dice si puede rechazar.  
         > El score dice si además vale la pena llamarlo primero por impacto operativo.
+
+        ---
+
+### Prioridad llamada
+
+La prioridad llamada se asigna con base en el `score_llamada_preventiva`.
+
+| Score llamada | Prioridad |
+|---:|---|
+| `>= 70` | 🚨 LLAMAR URGENTE |
+| `>= 50 y < 70` | 🟠 RIESGO ALTO |
+| `>= 30 y < 50` | 🟡 MONITOREAR |
+| `< 30` | 🟢 BAJO |
+
+---
+
+### Cómo interpretar cada campo
+
+| Campo | Qué significa |
+|---|---|
+| **Prob. rechazo** | Probabilidad suavizada de que el cliente rechace, usando su historial y la tasa global. |
+| **Score llamada** | Ranking preventivo que combina probabilidad, criticidad histórica, HL programados e impacto en volumen. |
+| **Prioridad llamada** | Clasificación operativa para decidir a quién llamar primero. |
+| **HL programados** | Volumen que está en riesgo para la fecha seleccionada. |
+| **HL rechazados hist.** | Volumen que el cliente rechazó históricamente. |
+
+---
+
+### Gestión persistente
+
+Cada pestaña guarda su propio historial en GitHub:
+
+| Pestaña | Archivo |
+|---|---|
+| **Top 10 Dashboard** | `gestion_top10_dashboard.csv` |
+| **Top llamadas preventivas** | `gestion_top10_llamadas.csv` |
+| **Comunicar buffer** | `gestion_comunicar_buffer.csv` |
+
+La lógica usa siempre el último registro del cliente:
+
+| Último estado | Botón Atendido | Botón Re comunicación |
+|---|---|---|
+| Sin gestión | Habilitado | Bloqueado |
+| ATENDIDO | Bloqueado | Habilitado |
+| RECOMUNICACION | Habilitado | Bloqueado |
         """)
 
     with st.expander("🧮 16. Score de criticidad: cómo se arma exactamente", expanded=True):
@@ -1293,208 +1345,401 @@ def mostrar_mapa_clientes(data, titulo):
             ),
         }
     )
+
 # =========================================================
-# GUARDAR CLIENTES ATENDIDOS EN GITHUB
+# GESTIÓN PERSISTENTE EN GITHUB
 # =========================================================
 
-def leer_csv_atendidos_github():
+COLUMNAS_GESTION = [
+    "fecha_click",
+    "cliente",
+    "cliente_nombre",
+    "dps",
+    "usuario",
+    "accion",
+    "origen"
+]
+
+
+def normalizar_cliente_dps_para_match(data):
+    base = data.copy()
+
+    base["cliente"] = (
+        pd.to_numeric(base["cliente"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+        .astype(str)
+    )
+
+    base["dps"] = (
+        pd.to_numeric(base["dps"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+        .astype(str)
+    )
+
+    base["clave_gestion"] = base["cliente"] + "|" + base["dps"]
+
+    return base
+
+
+def leer_csv_gestion_github(file_key):
     token = st.secrets.get("GITHUB_TOKEN", None)
 
     if not token:
         st.error("No existe GITHUB_TOKEN en Streamlit Secrets.")
         st.stop()
 
+    file_path = GESTION_FILES[file_key]
+    url = github_contents_url(file_path)
+
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
-        "User-Agent": "streamlit-otif-dashboard"
+        "User-Agent": "streamlit-proyecto-fenix"
     }
 
-    params = {
-        "ref": GITHUB_BRANCH
-    }
+    params = {"ref": GITHUB_BRANCH}
 
     r = requests.get(
-        GITHUB_CONTENTS_URL,
+        url,
         headers=headers,
         params=params,
         timeout=20
     )
 
-    columnas = [
-        "fecha_click",
-        "cliente",
-        "cliente_nombre",
-        "dps",
-        "origen"
-    ]
-
     if r.status_code == 404:
-        return pd.DataFrame(columns=columnas), None
+        return pd.DataFrame(columns=COLUMNAS_GESTION), None
 
     r.raise_for_status()
 
     data = r.json()
     sha = data["sha"]
 
-    contenido_base64 = data["content"]
-    contenido_bytes = base64.b64decode(contenido_base64)
+    contenido_bytes = base64.b64decode(data["content"])
 
-    df_existente = pd.read_csv(BytesIO(contenido_bytes))
+    df_existente = pd.read_csv(
+        BytesIO(contenido_bytes),
+        encoding="utf-8-sig"
+    )
 
-    for col in columnas:
+    for col in COLUMNAS_GESTION:
         if col not in df_existente.columns:
             df_existente[col] = ""
 
-    df_existente = df_existente[columnas]
-
-    return df_existente, sha
+    return df_existente[COLUMNAS_GESTION].copy(), sha
 
 
-def guardar_csv_atendidos_github(df_nuevo):
+def guardar_csv_gestion_github(df_nuevo, file_key):
     token = st.secrets.get("GITHUB_TOKEN", None)
 
     if not token:
         st.error("No existe GITHUB_TOKEN en Streamlit Secrets.")
         st.stop()
 
+    file_path = GESTION_FILES[file_key]
+    url = github_contents_url(file_path)
+
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
-        "User-Agent": "streamlit-otif-dashboard"
+        "User-Agent": "streamlit-proyecto-fenix"
     }
 
-    df_existente, sha = leer_csv_atendidos_github()
-
-    columnas = [
-        "fecha_click",
-        "cliente",
-        "cliente_nombre",
-        "dps",
-        "origen"
-    ]
-
-    for col in columnas:
+    for col in COLUMNAS_GESTION:
         if col not in df_nuevo.columns:
             df_nuevo[col] = ""
 
-    df_nuevo = df_nuevo[columnas]
+    df_nuevo = df_nuevo[COLUMNAS_GESTION].copy()
 
-    df_final = pd.concat(
-        [df_existente, df_nuevo],
-        ignore_index=True
-    )
+    # Reintento simple por si dos personas guardan casi al mismo tiempo
+    for intento in range(2):
+        df_existente, sha = leer_csv_gestion_github(file_key)
 
-    df_final = df_final.drop_duplicates(
-        subset=[
-            "fecha_click",
-            "cliente",
-            "cliente_nombre",
-            "dps",
-            "origen"
-        ]
-    )
+        df_final = pd.concat(
+            [df_existente, df_nuevo],
+            ignore_index=True
+        )
 
-    csv_texto = df_final.to_csv(index=False, encoding="utf-8-sig")
-    csv_base64 = base64.b64encode(
-        csv_texto.encode("utf-8-sig")
-    ).decode("utf-8")
+        # No eliminamos duplicados: queremos historial completo
+        csv_texto = df_final.to_csv(index=False, encoding="utf-8-sig")
 
-    payload = {
-        "message": "Actualizar clientes atendidos desde Streamlit",
-        "content": csv_base64,
-        "branch": GITHUB_BRANCH
-    }
+        csv_base64 = base64.b64encode(
+            csv_texto.encode("utf-8-sig")
+        ).decode("utf-8")
 
-    if sha:
-        payload["sha"] = sha
+        payload = {
+            "message": f"Actualizar gestión {file_path} desde Streamlit",
+            "content": csv_base64,
+            "branch": GITHUB_BRANCH
+        }
 
-    r = requests.put(
-        GITHUB_CONTENTS_URL,
-        headers=headers,
-        json=payload,
-        timeout=20
-    )
+        if sha:
+            payload["sha"] = sha
 
-    if r.status_code not in [200, 201]:
-        st.error("No se pudo actualizar el archivo de clientes atendidos.")
+        r = requests.put(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=20
+        )
+
+        if r.status_code in [200, 201]:
+            return True
+
+        # 409 = conflicto por SHA si alguien guardó al mismo tiempo
+        if r.status_code == 409 and intento == 0:
+            continue
+
+        st.error("No se pudo actualizar el archivo de gestión.")
         st.write(r.status_code)
         st.write(r.text)
         st.stop()
 
-    return True
+    return False
 
 
-def mostrar_tabla_atendidos(data, origen, key_tabla, column_config_extra=None):
-    """
-    Tabla reutilizable con checkbox de atendido.
-    Sirve para Top 10 Dashboard y Top 10 Ventana de Llamadas.
-    """
+def obtener_estado_gestion(file_key):
+    df_gestion, _ = leer_csv_gestion_github(file_key)
 
-    tabla_editor = data.copy()
+    if df_gestion.empty:
+        return pd.DataFrame(
+            columns=[
+                "clave_gestion",
+                "ultima_accion",
+                "ultima_fecha_click",
+                "ultimo_usuario",
+                "cantidad_clicks"
+            ]
+        )
 
-    if "atendido" not in tabla_editor.columns:
-        tabla_editor.insert(0, "atendido", False)
+    df_gestion = normalizar_cliente_dps_para_match(df_gestion)
 
-    columnas_bloqueadas = [
-        col for col in tabla_editor.columns
-        if col != "atendido"
+    df_gestion["fecha_click_dt"] = pd.to_datetime(
+        df_gestion["fecha_click"],
+        errors="coerce"
+    )
+
+    df_gestion["accion"] = (
+        df_gestion["accion"]
+        .fillna("")
+        .astype(str)
+        .str.upper()
+        .str.strip()
+    )
+
+    df_gestion = df_gestion.sort_values(
+        ["clave_gestion", "fecha_click_dt"]
+    )
+
+    ultimos = (
+        df_gestion
+        .groupby("clave_gestion", as_index=False)
+        .tail(1)
+        .copy()
+    )
+
+    conteos = (
+        df_gestion
+        .groupby("clave_gestion", as_index=False)
+        .size()
+        .rename(columns={"size": "cantidad_clicks"})
+    )
+
+    estado = ultimos[
+        [
+            "clave_gestion",
+            "accion",
+            "fecha_click",
+            "usuario"
+        ]
+    ].rename(
+        columns={
+            "accion": "ultima_accion",
+            "fecha_click": "ultima_fecha_click",
+            "usuario": "ultimo_usuario"
+        }
+    )
+
+    estado = estado.merge(
+        conteos,
+        on="clave_gestion",
+        how="left"
+    )
+
+    return estado
+
+
+def anexar_estado_gestion(data, file_key):
+    base = data.copy()
+    base = normalizar_cliente_dps_para_match(base)
+
+    estado = obtener_estado_gestion(file_key)
+
+    base = base.merge(
+        estado,
+        on="clave_gestion",
+        how="left"
+    )
+
+    base["ultima_accion"] = base["ultima_accion"].fillna("SIN GESTIÓN")
+    base["ultima_fecha_click"] = base["ultima_fecha_click"].fillna("SIN DATO")
+    base["ultimo_usuario"] = base["ultimo_usuario"].fillna("SIN DATO")
+
+    base["cantidad_clicks"] = (
+        pd.to_numeric(base["cantidad_clicks"], errors="coerce")
+        .fillna(0)
+        .astype(int)
+    )
+
+    base["estado_gestion"] = np.select(
+        [
+            base["ultima_accion"].eq("ATENDIDO"),
+            base["ultima_accion"].eq("RECOMUNICACION")
+        ],
+        [
+            "Ya atendido ✅",
+            "Re comunicación 🔁"
+        ],
+        default="Pendiente"
+    )
+
+    return base
+
+
+def registrar_accion_gestion(row, file_key, origen, accion):
+    usuario = st.session_state.get("usuario_gestion", "")
+    usuario = str(usuario).strip()
+
+    if usuario == "":
+        usuario = "SIN_USUARIO"
+
+    fecha_click = datetime.now(
+        ZoneInfo("America/La_Paz")
+    ).strftime("%Y-%m-%d %H:%M:%S")
+
+    df_nuevo = pd.DataFrame(
+        [
+            {
+                "fecha_click": fecha_click,
+                "cliente": row["cliente"],
+                "cliente_nombre": row["cliente_nombre"],
+                "dps": row["dps"],
+                "usuario": usuario,
+                "accion": accion,
+                "origen": origen
+            }
+        ]
+    )
+
+    guardar_csv_gestion_github(df_nuevo, file_key)
+
+
+def mostrar_tabla_gestion(
+    data,
+    origen,
+    file_key,
+    key_base,
+    column_config_extra=None,
+    height=360
+):
+    tabla = anexar_estado_gestion(data, file_key)
+
+    columnas_prioridad = [
+        "estado_gestion",
+        "ultima_accion",
+        "ultima_fecha_click",
+        "ultimo_usuario",
+        "cantidad_clicks"
     ]
 
+    columnas_ordenadas = columnas_prioridad + [
+        c for c in tabla.columns
+        if c not in columnas_prioridad + ["clave_gestion"]
+    ]
+
+    tabla = tabla[columnas_ordenadas].copy()
+
     column_config_base = {
-        "atendido": st.column_config.CheckboxColumn(
-            "Atendido",
-            help="Marca los clientes que ya fueron gestionados.",
-            default=False
+        "estado_gestion": st.column_config.TextColumn("Estado gestión"),
+        "ultima_accion": st.column_config.TextColumn("Última acción"),
+        "ultima_fecha_click": st.column_config.TextColumn("Última fecha click"),
+        "ultimo_usuario": st.column_config.TextColumn("Último usuario"),
+        "cantidad_clicks": st.column_config.NumberColumn(
+            "Cantidad clicks",
+            format="%d"
         )
     }
 
     if column_config_extra:
         column_config_base.update(column_config_extra)
 
-    tabla_editada = st.data_editor(
-        tabla_editor,
+    st.dataframe(
+        tabla.drop(columns=["clave_gestion"], errors="ignore"),
         use_container_width=True,
-        height=360,
+        height=height,
         hide_index=True,
-        column_config=column_config_base,
-        disabled=columnas_bloqueadas,
-        key=key_tabla
+        column_config=column_config_base
     )
 
-    seleccionados = tabla_editada[
-        tabla_editada["atendido"] == True
-    ].copy()
+    st.markdown("#### ✅ Gestión de clientes")
 
-    if seleccionados.empty:
-        st.info("Marca uno o más clientes como atendidos para poder guardarlos.")
-        return
+    for i, row in tabla.iterrows():
+        ultimo_estado = str(row["ultima_accion"]).upper().strip()
 
-    st.success(f"Clientes marcados como atendidos: {len(seleccionados)}")
+        atendido_bloqueado = ultimo_estado == "ATENDIDO"
+        recomunicacion_bloqueada = ultimo_estado != "ATENDIDO"
 
-    if st.button(
-        "💾 Guardar clientes atendidos",
-        use_container_width=True,
-        key=f"guardar_{key_tabla}"
-    ):
-        fecha_click = datetime.now(
-            timezone(timedelta(hours=-4))
-        ).strftime("%d/%m/%Y %H:%M:%S")
+        with st.container(border=True):
+            c_info, c_atendido, c_recom = st.columns([4, 1.3, 1.5])
 
-        df_guardar = seleccionados[
-            [
-                "cliente",
-                "cliente_nombre",
-                "dps"
-            ]
-        ].copy()
+            with c_info:
+                st.markdown(
+                    f"""
+                    **{row['cliente']} - {row['cliente_nombre']}**  
+                    DPS: **{row['dps']}** | Estado: **{row['estado_gestion']}**  
+                    Última fecha: **{row['ultima_fecha_click']}** | Usuario: **{row['ultimo_usuario']}** | Clicks: **{row['cantidad_clicks']}**
+                    """
+                )
 
-        df_guardar.insert(0, "fecha_click", fecha_click)
-        df_guardar["origen"] = origen
+            with c_atendido:
+                if atendido_bloqueado:
+                    st.button(
+                        "Ya atendido ✅",
+                        key=f"atendido_bloqueado_{key_base}_{i}_{row['cliente']}_{row['dps']}",
+                        disabled=True,
+                        use_container_width=True
+                    )
+                else:
+                    if st.button(
+                        "Atendido",
+                        key=f"atendido_{key_base}_{i}_{row['cliente']}_{row['dps']}",
+                        use_container_width=True
+                    ):
+                        registrar_accion_gestion(
+                            row=row,
+                            file_key=file_key,
+                            origen=origen,
+                            accion="ATENDIDO"
+                        )
+                        st.success("Cliente guardado como ATENDIDO.")
+                        st.rerun()
 
-        guardar_csv_atendidos_github(df_guardar)
-
-        st.success("Clientes atendidos guardados correctamente.")
+            with c_recom:
+                if st.button(
+                    "🔁 Re comunicación",
+                    key=f"recom_{key_base}_{i}_{row['cliente']}_{row['dps']}",
+                    disabled=recomunicacion_bloqueada,
+                    use_container_width=True
+                ):
+                    registrar_accion_gestion(
+                        row=row,
+                        file_key=file_key,
+                        origen=origen,
+                        accion="RECOMUNICACION"
+                    )
+                    st.success("Cliente guardado como RECOMUNICACION.")
+                    st.rerun()
 # =========================================================
 # PEDIDOS PARA MAÑANA / PRÓXIMOS DÍAS
 # =========================================================
@@ -1943,7 +2188,7 @@ def mostrar_pedidos_manana(historico_filtrado):
 
     with col_titulo:
         ultima_actualizacion_pedidos = get_last_update_pedidos()
-    
+
         st.caption(
             "Cruce preventivo entre pedidos programados y clientes con historial de rechazo. "
             f"Última actualización pedidos: {ultima_actualizacion_pedidos}."
@@ -1960,24 +2205,19 @@ def mostrar_pedidos_manana(historico_filtrado):
     st.divider()
 
     pedidos = cargar_pedidos_programados()
-
-    # Usamos el histórico ya filtrado por el sidebar del dashboard
     historico = historico_filtrado.copy()
 
-    # Asegurar score y prioridad si por algún motivo no existen
     if "score_criticidad" not in historico.columns:
         historico = calcular_score_criticidad(historico)
 
     if "prioridad" not in historico.columns:
         historico["prioridad"] = historico["score_criticidad"].apply(clasificar_prioridad)
 
-    # Aplicar filtros del dashboard también a la tabla de pedidos
     clientes_filtrados = historico["cliente"].astype(str).unique()
 
     pedidos = pedidos[
         pedidos["cliente"].astype(str).isin(clientes_filtrados)
     ].copy()
-
 
     hoy = datetime.now(ZoneInfo("America/La_Paz")).date()
 
@@ -1992,7 +2232,6 @@ def mostrar_pedidos_manana(historico_filtrado):
     for n in range(1, 8):
         fecha = hoy + timedelta(days=n)
 
-        # Regla: si hoy es sábado, no proponer domingo como default operativo
         if hoy.weekday() == 5 and n == 1:
             etiqueta = f"N+{n} - {fecha.strftime('%d/%m/%Y')} - Domingo sin atención"
         else:
@@ -2006,9 +2245,6 @@ def mostrar_pedidos_manana(historico_filtrado):
             }
         )
 
-    # Default:
-    # Si hoy es sábado, usa N+2.
-    # Si no, usa N+1.
     default_index = 1 if hoy.weekday() == 5 else 0
 
     col_f1, col_f2 = st.columns([2, 1])
@@ -2024,13 +2260,7 @@ def mostrar_pedidos_manana(historico_filtrado):
     fecha_objetivo = opcion_sel["fecha"]
 
     with col_f2:
-        top_n = st.number_input(
-            "Cantidad de clientes a mostrar",
-            min_value=5,
-            max_value=50,
-            value=10,
-            step=5
-        )
+        st.metric("Bloque visual", "10 clientes")
 
     pedidos_filtrados = pedidos.copy()
 
@@ -2049,27 +2279,216 @@ def mostrar_pedidos_manana(historico_filtrado):
 
     if base_preventiva.empty:
         st.info("No hay pedidos programados para la fecha seleccionada.")
-        return
+    else:
+        total_clientes = base_preventiva["cliente"].nunique()
+        total_pedidos = base_preventiva["pedidos_programados"].sum()
+        total_hl = base_preventiva["hl_programados"].sum()
 
-    total_clientes = base_preventiva["cliente"].nunique()
-    total_pedidos = base_preventiva["pedidos_programados"].sum()
-    total_hl = base_preventiva["hl_programados"].sum()
-    clientes_urgentes = base_preventiva[
-        base_preventiva["prioridad_llamada"].eq("🚨 LLAMAR URGENTE")
-    ]["cliente"].nunique()
+        m1, m2, m3 = st.columns(3)
 
-    m1, m2, m3 = st.columns(3)
+        m1.metric("Clientes con pedido", f"{total_clientes:,.0f}")
+        m2.metric("Pedidos programados", f"{total_pedidos:,.0f}")
+        m3.metric("HL programados", f"{total_hl:,.1f}")
 
-    m1.metric("Clientes con pedido", f"{total_clientes:,.0f}")
-    m2.metric("Pedidos programados", f"{total_pedidos:,.0f}")
-    m3.metric("HL programados", f"{total_hl:,.1f}")
+        st.markdown("### 🚨 Top clientes a llamar preventivamente")
+
+        ranking_preventivo = base_preventiva.reset_index(drop=True).copy()
+
+        ya_atendi_llamadas = st.checkbox(
+            "✅ Ya atendí estos 10 clientes de llamadas, mostrar los siguientes 10",
+            key="ya_atendi_llamadas"
+        )
+
+        if ya_atendi_llamadas:
+            max_saltar_llamadas = max(len(ranking_preventivo) - 1, 0)
+
+            if max_saltar_llamadas >= 10:
+                clientes_a_saltar_llamadas = st.number_input(
+                    "Cantidad de clientes de llamadas ya atendidos",
+                    min_value=10,
+                    max_value=max_saltar_llamadas,
+                    value=10,
+                    step=10,
+                    key="clientes_a_saltar_llamadas"
+                )
+            else:
+                clientes_a_saltar_llamadas = 0
+                st.info("No hay suficientes clientes de llamadas para mostrar el siguiente bloque.")
+        else:
+            clientes_a_saltar_llamadas = 0
+
+        top_preventivo = ranking_preventivo.iloc[
+            clientes_a_saltar_llamadas:clientes_a_saltar_llamadas + 10
+        ].copy()
+
+        if top_preventivo.empty:
+            st.info("No hay clientes para mostrar en este bloque.")
+        else:
+            st.caption(
+                f"Mostrando clientes de llamadas del puesto "
+                f"{clientes_a_saltar_llamadas + 1} al "
+                f"{clientes_a_saltar_llamadas + len(top_preventivo)} "
+                f"de {len(ranking_preventivo)}."
+            )
+
+            tabla_top = top_preventivo[
+                [
+                    "prioridad_llamada",
+                    "score_llamada_preventiva",
+                    "probabilidad_rechazo_pct",
+                    "cliente",
+                    "cliente_nombre",
+                    "dps",
+                    "pedidos_programados",
+                    "lista_pedidos",
+                    "hl_programados",
+                    "entregas_totales",
+                    "entregas_rech",
+                    "hl_rechazados",
+                    "motivo_rechazo_principal",
+                    "accion_preventiva"
+                ]
+            ].copy()
+
+            mostrar_tabla_gestion(
+                data=tabla_top,
+                origen="Top clientes a llamar preventivamente",
+                file_key="llamadas",
+                key_base=f"top10_llamadas_{fecha_objetivo}_{clientes_a_saltar_llamadas}",
+                column_config_extra={
+                    "score_llamada_preventiva": st.column_config.NumberColumn(
+                        "Score llamada",
+                        format="%.1f"
+                    ),
+                    "probabilidad_rechazo_pct": st.column_config.NumberColumn(
+                        "Prob. rechazo",
+                        format="%.1f%%"
+                    ),
+                    "hl_programados": st.column_config.NumberColumn(
+                        "HL programados",
+                        format="%.2f"
+                    ),
+                    "hl_rechazados": st.column_config.NumberColumn(
+                        "HL rechazados hist.",
+                        format="%.2f"
+                    )
+                }
+            )
+
+            st.markdown("### 📱 Vista móvil de llamadas")
+
+            for _, row in top_preventivo.iterrows():
+                with st.container(border=True):
+                    st.markdown(f"""
+### {row['prioridad_llamada']} | {row['cliente']} - {row['cliente_nombre']}
+
+**Score llamada:** {row['score_llamada_preventiva']:.1f}  
+**Probabilidad rechazo:** {row['probabilidad_rechazo_pct']:.1f}%  
+**DPS:** {row['dps']}  
+**Pedidos:** {row['pedidos_programados']}  
+**Nros pedido:** {row['lista_pedidos']}  
+**HL programados:** {row['hl_programados']:.2f}  
+**Histórico:** {int(row['entregas_rech'])} rechazos de {int(row['entregas_totales'])} entregas  
+**HL rechazados histórico:** {row['hl_rechazados']:.2f}  
+**Motivo principal:** {row['motivo_rechazo_principal']}  
+**Ventana recepción:** {row['ventana_horaria_recepcion']}  
+**Ventana local cerrado:** {row['ventana_local_cerrado']}  
+
+👉 **Acción:** {row['accion_preventiva']}  
+
+**Zona:** {row.get('zona_desc', 'SIN DATO')}  
+**Dirección:** {row.get('domicilio', 'SIN DATO')}
+                    """)
+
+        st.markdown("### 📋 Lista completa preventiva")
+
+        prioridad_sel = st.multiselect(
+            "Filtrar prioridad llamada",
+            options=base_preventiva["prioridad_llamada"].dropna().unique(),
+            default=base_preventiva["prioridad_llamada"].dropna().unique()
+        )
+
+        base_filtrada = base_preventiva[
+            base_preventiva["prioridad_llamada"].isin(prioridad_sel)
+        ].copy()
+
+        st.dataframe(
+            base_filtrada[
+                [
+                    "prioridad_llamada",
+                    "score_llamada_preventiva",
+                    "probabilidad_rechazo_pct",
+                    "cliente",
+                    "cliente_nombre",
+                    "dps",
+                    "pedidos_programados",
+                    "lista_pedidos",
+                    "hl_programados",
+                    "bultos_programados",
+                    "importe_programado",
+                    "entregas_totales",
+                    "entregas_rech",
+                    "hl_rechazados",
+                    "motivo_rechazo_principal",
+                    "accion_preventiva",
+                    "zona_desc",
+                    "domicilio"
+                ]
+            ],
+            use_container_width=True,
+            height=480,
+            hide_index=True
+        )
+
+        csv_preventivo = base_filtrada.to_csv(index=False).encode("utf-8-sig")
+
+        st.download_button(
+            "📥 Descargar lista preventiva CSV",
+            csv_preventivo,
+            f"pedidos_preventivos_{fecha_objetivo}.csv",
+            "text/csv"
+        )
+
+        st.markdown("### 🧾 Detalle de pedidos de la fecha seleccionada")
+
+        detalle_ordenado = detalle_pedidos.copy()
+
+        orden_cols = [
+            c for c in ["cliente", "cliente_nombre", "nro", "producto_nombre"]
+            if c in detalle_ordenado.columns
+        ]
+
+        detalle_ordenado = detalle_ordenado.sort_values(orden_cols)
+
+        st.dataframe(
+            detalle_ordenado[
+                [
+                    "fecha_entrega",
+                    "cliente",
+                    "cliente_nombre",
+                    "dps",
+                    "nro",
+                    "sts",
+                    "producto",
+                    "producto_nombre",
+                    "bultos",
+                    "hl",
+                    "importe_total",
+                    "zona_desc",
+                    "domicilio"
+                ]
+            ],
+            use_container_width=True,
+            height=420,
+            hide_index=True
+        )
 
     # =========================================================
-    # COMUNICAR BUFFER
+    # COMUNICAR BUFFER AL FINAL
     # =========================================================
-    
+
     st.markdown("### 📣 Comunicar buffer")
-    
+
     if buffer_clientes.empty:
         st.success("No hay pedidos vencidos pendientes en estado LIB o RET.")
     else:
@@ -2077,43 +2496,79 @@ def mostrar_pedidos_manana(historico_filtrado):
         total_pedidos_buffer = buffer_clientes["pedidos_buffer"].sum()
         total_hl_buffer = buffer_clientes["hl_buffer"].sum()
         max_dias_buffer = buffer_clientes["dias_atraso_max"].max()
-    
+
         b1, b2, b3, b4 = st.columns(4)
-    
+
         b1.metric("Clientes en buffer", f"{total_clientes_buffer:,.0f}")
         b2.metric("Pedidos en buffer", f"{total_pedidos_buffer:,.0f}")
         b3.metric("HL en buffer", f"{total_hl_buffer:,.1f}")
         b4.metric("Mayor atraso", f"{int(max_dias_buffer)} días")
-    
+
         st.caption(
             "Clientes con fecha de entrega anterior a hoy y pedidos aún en estado LIB o RET."
         )
-    
-        top_buffer = buffer_clientes.head(10).copy()
-    
-        st.dataframe(
-            top_buffer[
-                [
-                    "prioridad_buffer",
-                    "score_comunicar_buffer",
-                    "cliente",
-                    "cliente_nombre",
-                    "dps",
-                    "fecha_entrega_mas_antigua",
-                    "fecha_entrega_mas_reciente",
-                    "dias_atraso_max",
-                    "pedidos_buffer",
-                    "lista_pedidos",
-                    "hl_buffer",
-                    "estados",
-                    "motivo_rechazo_principal",
-                    "accion_buffer"
-                ]
-            ],
-            use_container_width=True,
-            height=330,
-            hide_index=True,
-            column_config={
+
+        ranking_buffer = buffer_clientes.reset_index(drop=True).copy()
+
+        ya_atendi_buffer = st.checkbox(
+            "✅ Ya atendí estos 10 clientes de buffer, mostrar los siguientes 10",
+            key="ya_atendi_buffer"
+        )
+
+        if ya_atendi_buffer:
+            max_saltar_buffer = max(len(ranking_buffer) - 1, 0)
+
+            if max_saltar_buffer >= 10:
+                clientes_a_saltar_buffer = st.number_input(
+                    "Cantidad de clientes de buffer ya atendidos",
+                    min_value=10,
+                    max_value=max_saltar_buffer,
+                    value=10,
+                    step=10,
+                    key="clientes_a_saltar_buffer"
+                )
+            else:
+                clientes_a_saltar_buffer = 0
+                st.info("No hay suficientes clientes de buffer para mostrar el siguiente bloque.")
+        else:
+            clientes_a_saltar_buffer = 0
+
+        top_buffer = ranking_buffer.iloc[
+            clientes_a_saltar_buffer:clientes_a_saltar_buffer + 10
+        ].copy()
+
+        st.caption(
+            f"Mostrando clientes de buffer del puesto "
+            f"{clientes_a_saltar_buffer + 1} al "
+            f"{clientes_a_saltar_buffer + len(top_buffer)} "
+            f"de {len(ranking_buffer)}."
+        )
+
+        tabla_buffer = top_buffer[
+            [
+                "prioridad_buffer",
+                "score_comunicar_buffer",
+                "cliente",
+                "cliente_nombre",
+                "dps",
+                "fecha_entrega_mas_antigua",
+                "fecha_entrega_mas_reciente",
+                "dias_atraso_max",
+                "pedidos_buffer",
+                "lista_pedidos",
+                "hl_buffer",
+                "estados",
+                "motivo_rechazo_principal",
+                "accion_buffer"
+            ]
+        ].copy()
+
+        mostrar_tabla_gestion(
+            data=tabla_buffer,
+            origen="Comunicar buffer",
+            file_key="buffer",
+            key_base=f"top10_buffer_{clientes_a_saltar_buffer}",
+            column_config_extra={
                 "score_comunicar_buffer": st.column_config.NumberColumn(
                     "Score buffer",
                     format="%.1f"
@@ -2124,30 +2579,30 @@ def mostrar_pedidos_manana(historico_filtrado):
                 )
             }
         )
-    
+
         with st.expander("📱 Vista móvil comunicar buffer", expanded=False):
             for _, row in top_buffer.iterrows():
                 with st.container(border=True):
                     st.markdown(f"""
-    ### {row['prioridad_buffer']} | {row['cliente']} - {row['cliente_nombre']}
-    
-    **Score buffer:** {row['score_comunicar_buffer']:.1f}  
-    **DPS:** {row['dps']}  
-    **Pedidos pendientes:** {row['pedidos_buffer']}  
-    **Nros pedido:** {row['lista_pedidos']}  
-    **Estados:** {row['estados']}  
-    **Fecha más antigua:** {row['fecha_entrega_mas_antigua']}  
-    **Fecha más reciente:** {row['fecha_entrega_mas_reciente']}  
-    **Días de atraso:** {int(row['dias_atraso_max'])}  
-    **HL en buffer:** {row['hl_buffer']:.2f}  
-    **Motivo histórico principal:** {row['motivo_rechazo_principal']}  
-    
-    👉 **Acción:** {row['accion_buffer']}  
-    
-    **Zona:** {row.get('zona_desc', 'SIN DATO')}  
-    **Dirección:** {row.get('domicilio', 'SIN DATO')}
+### {row['prioridad_buffer']} | {row['cliente']} - {row['cliente_nombre']}
+
+**Score buffer:** {row['score_comunicar_buffer']:.1f}  
+**DPS:** {row['dps']}  
+**Pedidos pendientes:** {row['pedidos_buffer']}  
+**Nros pedido:** {row['lista_pedidos']}  
+**Estados:** {row['estados']}  
+**Fecha más antigua:** {row['fecha_entrega_mas_antigua']}  
+**Fecha más reciente:** {row['fecha_entrega_mas_reciente']}  
+**Días de atraso:** {int(row['dias_atraso_max'])}  
+**HL en buffer:** {row['hl_buffer']:.2f}  
+**Motivo histórico principal:** {row['motivo_rechazo_principal']}  
+
+👉 **Acción:** {row['accion_buffer']}  
+
+**Zona:** {row.get('zona_desc', 'SIN DATO')}  
+**Dirección:** {row.get('domicilio', 'SIN DATO')}
                     """)
-    
+
         with st.expander("🧾 Detalle completo buffer", expanded=False):
             st.dataframe(
                 detalle_buffer[
@@ -2172,170 +2627,15 @@ def mostrar_pedidos_manana(historico_filtrado):
                 height=420,
                 hide_index=True
             )
-    
+
             csv_buffer = buffer_clientes.to_csv(index=False).encode("utf-8-sig")
-    
+
             st.download_button(
                 "📥 Descargar comunicar buffer CSV",
                 csv_buffer,
                 "comunicar_buffer.csv",
                 "text/csv"
             )
-
-    st.markdown("### 🚨 Top clientes a llamar preventivamente")
-
-    top_preventivo = base_preventiva.head(int(top_n)).copy()
-
-    tabla_top = top_preventivo[
-        [
-            "prioridad_llamada",
-            "score_llamada_preventiva",
-            "probabilidad_rechazo_pct",
-            "cliente",
-            "cliente_nombre",
-            "dps",
-            "pedidos_programados",
-            "lista_pedidos",
-            "hl_programados",
-            "entregas_totales",
-            "entregas_rech",
-            "hl_rechazados",
-            "motivo_rechazo_principal",
-            "accion_preventiva"
-        ]
-    ].copy()
-
-    mostrar_tabla_atendidos(
-        data=tabla_top,
-        origen="Top 10 Ventana de Llamadas",
-        key_tabla=f"top10_llamadas_{fecha_objetivo}_{top_n}",
-        column_config_extra={
-            "score_llamada_preventiva": st.column_config.NumberColumn(
-                "Score llamada",
-                format="%.1f"
-            ),
-            "probabilidad_rechazo_pct": st.column_config.NumberColumn(
-                "Prob. rechazo",
-                format="%.1f%%"
-            ),
-            "hl_programados": st.column_config.NumberColumn(
-                "HL programados",
-                format="%.2f"
-            ),
-            "hl_rechazados": st.column_config.NumberColumn(
-                "HL rechazados hist.",
-                format="%.2f"
-            )
-        }
-    )
-
-    st.markdown("### 📱 Vista móvil de llamadas")
-
-    for _, row in top_preventivo.iterrows():
-        with st.container(border=True):
-            st.markdown(f"""
-### {row['prioridad_llamada']} | {row['cliente']} - {row['cliente_nombre']}
-
-**Score llamada:** {row['score_llamada_preventiva']:.1f}  
-**Probabilidad rechazo:** {row['probabilidad_rechazo_pct']:.1f}%  
-**DPS:** {row['dps']}  
-**Pedidos:** {row['pedidos_programados']}  
-**Nros pedido:** {row['lista_pedidos']}  
-**HL programados:** {row['hl_programados']:.2f}  
-**Histórico:** {int(row['entregas_rech'])} rechazos de {int(row['entregas_totales'])} entregas  
-**HL rechazados histórico:** {row['hl_rechazados']:.2f}  
-**Motivo principal:** {row['motivo_rechazo_principal']}  
-**Ventana recepción:** {row['ventana_horaria_recepcion']}  
-**Ventana local cerrado:** {row['ventana_local_cerrado']}  
-
-👉 **Acción:** {row['accion_preventiva']}  
-
-**Zona:** {row.get('zona_desc', 'SIN DATO')}  
-**Dirección:** {row.get('domicilio', 'SIN DATO')}
-            """)
-
-    st.markdown("### 📋 Lista completa preventiva")
-
-    prioridad_sel = st.multiselect(
-        "Filtrar prioridad llamada",
-        options=base_preventiva["prioridad_llamada"].dropna().unique(),
-        default=base_preventiva["prioridad_llamada"].dropna().unique()
-    )
-
-    base_filtrada = base_preventiva[
-        base_preventiva["prioridad_llamada"].isin(prioridad_sel)
-    ].copy()
-
-    st.dataframe(
-        base_filtrada[
-            [
-                "prioridad_llamada",
-                "score_llamada_preventiva",
-                "probabilidad_rechazo_pct",
-                "cliente",
-                "cliente_nombre",
-                "dps",
-                "pedidos_programados",
-                "lista_pedidos",
-                "hl_programados",
-                "bultos_programados",
-                "importe_programado",
-                "entregas_totales",
-                "entregas_rech",
-                "hl_rechazados",
-                "motivo_rechazo_principal",
-                "accion_preventiva",
-                "zona_desc",
-                "domicilio"
-            ]
-        ],
-        use_container_width=True,
-        height=480,
-        hide_index=True
-    )
-
-    csv_preventivo = base_filtrada.to_csv(index=False).encode("utf-8-sig")
-
-    st.download_button(
-        "📥 Descargar lista preventiva CSV",
-        csv_preventivo,
-        f"pedidos_preventivos_{fecha_objetivo}.csv",
-        "text/csv"
-    )
-
-    st.markdown("### 🧾 Detalle de pedidos de la fecha seleccionada")
-
-    detalle_ordenado = detalle_pedidos.copy()
-
-    orden_cols = [
-        c for c in ["cliente", "cliente_nombre", "nro", "producto_nombre"]
-        if c in detalle_ordenado.columns
-    ]
-
-    detalle_ordenado = detalle_ordenado.sort_values(orden_cols)
-
-    st.dataframe(
-        detalle_ordenado[
-            [
-                "fecha_entrega",
-                "cliente",
-                "cliente_nombre",
-                "dps",
-                "nro",
-                "sts",
-                "producto",
-                "producto_nombre",
-                "bultos",
-                "hl",
-                "importe_total",
-                "zona_desc",
-                "domicilio"
-            ]
-        ],
-        use_container_width=True,
-        height=420,
-        hide_index=True
-    )
 # =========================================================
 # HEADER CON BOTÓN INFORMACIÓN
 # =========================================================
@@ -2344,7 +2644,7 @@ header_left, header_dashboard, header_pedidos, header_info = st.columns([4, 1.1,
 
 with header_left:
     if st.session_state["vista_actual"] == "dashboard":
-        st.title("🚀 Centro de Oportunidades Operativas")
+        st.title("🔥 PROYECTO FENIX")
     elif st.session_state["vista_actual"] == "pedidos_manana":
         st.title("📞 Pedidos para llamar")
     elif st.session_state["vista_actual"] == "informacion":
@@ -2390,6 +2690,14 @@ st.caption(
 # =========================================================
 
 st.sidebar.title("🔎 Filtros")
+
+st.sidebar.markdown("### 👤 Gestión")
+
+st.sidebar.text_input(
+    "Usuario que gestiona",
+    placeholder="Ej: Pablo / Equipo DPS 7",
+    key="usuario_gestion"
+)
 
 dps_sel = st.sidebar.multiselect(
     "DPS",
@@ -2458,105 +2766,6 @@ if df_filtrado.empty:
 if st.session_state["vista_actual"] == "pedidos_manana":
     mostrar_pedidos_manana(df_filtrado)
     st.stop()
-
-
-# =========================================================
-# TABLA COMPLETA PRIMERO
-# =========================================================
-
-st.subheader("📋 Tabla Completa Filtrada")
-
-tabla_cols = [
-    "cliente",
-    "cliente_nombre",
-    "dps",
-    "prioridad",
-    "score_criticidad",
-    "entregas_totales",
-    "entregas_rech",
-    "entregas_sus",
-    "entregas_ok",
-    "hl_comprados",
-    "hl_rechazados",
-    "pct_rechazo",
-    "pct_suspension",
-    "pct_hl_rechazado",
-    "frecuencia_semanal",
-    "madurez_cliente",
-    "motivo_rechazo_principal",
-    "resumen_motivos_rechazo",
-    "ventana_horaria_recepcion",
-    "ventana_local_cerrado",
-    "dia_entrega",
-    "dias_flex",
-    "tipo_gestion",
-    "accion_recomendada",
-    "x",
-    "y"
-]
-
-tabla_cols = [c for c in tabla_cols if c in df_filtrado.columns]
-
-tabla_vista = (
-    df_filtrado[tabla_cols]
-    .sort_values("score_criticidad", ascending=False)
-    .copy()
-)
-
-tabla_vista["pct_rechazo"] = tabla_vista["pct_rechazo"] * 100
-tabla_vista["pct_suspension"] = tabla_vista["pct_suspension"] * 100
-tabla_vista["pct_hl_rechazado"] = tabla_vista["pct_hl_rechazado"] * 100
-
-st.dataframe(
-    tabla_vista,
-    use_container_width=True,
-    height=520,
-    column_config={
-        "score_criticidad": st.column_config.NumberColumn(
-            "Score criticidad",
-            format="%.1f"
-        ),
-        "hl_comprados": st.column_config.NumberColumn(
-            "HL comprados",
-            format="%.2f"
-        ),
-        "hl_rechazados": st.column_config.NumberColumn(
-            "HL rechazados",
-            format="%.2f"
-        ),
-        "pct_rechazo": st.column_config.NumberColumn(
-            "% rechazo",
-            format="%.1f%%"
-        ),
-        "pct_suspension": st.column_config.NumberColumn(
-            "% suspensión",
-            format="%.1f%%"
-        ),
-        "pct_hl_rechazado": st.column_config.NumberColumn(
-            "% HL rechazado",
-            format="%.1f%%"
-        ),
-        "frecuencia_semanal": st.column_config.NumberColumn(
-            "Frecuencia semanal",
-            format="%.2f"
-        ),
-        "ventana_horaria_recepcion": st.column_config.TextColumn(
-            "Ventana horaria de recepción"
-        ),
-        "ventana_local_cerrado": st.column_config.TextColumn(
-            "Ventana rechazo local cerrado"
-        ),
-    }
-)
-
-csv = tabla_vista.to_csv(index=False).encode("utf-8-sig")
-
-st.download_button(
-    "📥 Descargar tabla filtrada CSV",
-    csv,
-    "tabla_clientes_filtrada.csv",
-    "text/csv"
-)
 
 # =========================================================
 # RESUMEN EJECUTIVO ORDENADO
@@ -2747,10 +2956,11 @@ else:
         top_vista["participacion_rechazos"] = top_vista["participacion_rechazos"] * 100
         top_vista["participacion_hl_rechazado"] = top_vista["participacion_hl_rechazado"] * 100
 
-        mostrar_tabla_atendidos(
+        mostrar_tabla_gestion(
             data=top_vista,
             origen="Top 10 Dashboard",
-            key_tabla=f"top10_dashboard_{clientes_a_saltar}",
+            file_key="dashboard",
+            key_base=f"top10_dashboard_{clientes_a_saltar}",
             column_config_extra={
                 "score_criticidad": st.column_config.NumberColumn(
                     "Score",
@@ -2782,7 +2992,6 @@ else:
                 ),
             }
         )
-      
 
         st.subheader("🧠 Plan de Acción para Clientes Priorizados")
 
@@ -3041,3 +3250,102 @@ if cliente_sel:
             )
 else:
     st.info("Selecciona uno o más códigos de cliente para ver la ficha.")
+
+# =========================================================
+# TABLA COMPLETA AL FINAL DEL DASHBOARD
+# =========================================================
+
+st.subheader("📋 Tabla Completa Filtrada")
+
+tabla_cols = [
+    "cliente",
+    "cliente_nombre",
+    "dps",
+    "prioridad",
+    "score_criticidad",
+    "entregas_totales",
+    "entregas_rech",
+    "entregas_sus",
+    "entregas_ok",
+    "hl_comprados",
+    "hl_rechazados",
+    "pct_rechazo",
+    "pct_suspension",
+    "pct_hl_rechazado",
+    "frecuencia_semanal",
+    "madurez_cliente",
+    "motivo_rechazo_principal",
+    "resumen_motivos_rechazo",
+    "ventana_horaria_recepcion",
+    "ventana_local_cerrado",
+    "dia_entrega",
+    "dias_flex",
+    "tipo_gestion",
+    "accion_recomendada",
+    "x",
+    "y"
+]
+
+tabla_cols = [c for c in tabla_cols if c in df_filtrado.columns]
+
+tabla_vista = (
+    df_filtrado[tabla_cols]
+    .sort_values("score_criticidad", ascending=False)
+    .copy()
+)
+
+tabla_vista["pct_rechazo"] = tabla_vista["pct_rechazo"] * 100
+tabla_vista["pct_suspension"] = tabla_vista["pct_suspension"] * 100
+tabla_vista["pct_hl_rechazado"] = tabla_vista["pct_hl_rechazado"] * 100
+
+st.dataframe(
+    tabla_vista,
+    use_container_width=True,
+    height=520,
+    column_config={
+        "score_criticidad": st.column_config.NumberColumn(
+            "Score criticidad",
+            format="%.1f"
+        ),
+        "hl_comprados": st.column_config.NumberColumn(
+            "HL comprados",
+            format="%.2f"
+        ),
+        "hl_rechazados": st.column_config.NumberColumn(
+            "HL rechazados",
+            format="%.2f"
+        ),
+        "pct_rechazo": st.column_config.NumberColumn(
+            "% rechazo",
+            format="%.1f%%"
+        ),
+        "pct_suspension": st.column_config.NumberColumn(
+            "% suspensión",
+            format="%.1f%%"
+        ),
+        "pct_hl_rechazado": st.column_config.NumberColumn(
+            "% HL rechazado",
+            format="%.1f%%"
+        ),
+        "frecuencia_semanal": st.column_config.NumberColumn(
+            "Frecuencia semanal",
+            format="%.2f"
+        ),
+        "ventana_horaria_recepcion": st.column_config.TextColumn(
+            "Ventana horaria de recepción"
+        ),
+        "ventana_local_cerrado": st.column_config.TextColumn(
+            "Ventana rechazo local cerrado"
+        ),
+    }
+)
+
+csv = tabla_vista.to_csv(index=False).encode("utf-8-sig")
+
+st.download_button(
+    "📥 Descargar tabla filtrada CSV",
+    csv,
+    "tabla_clientes_filtrada.csv",
+    "text/csv"
+)
+    
