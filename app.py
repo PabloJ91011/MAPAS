@@ -2802,9 +2802,9 @@ header_left, header_dashboard, header_pedidos, header_info = st.columns([4, 1.1,
 
 with header_left:
     if st.session_state["vista_actual"] == "dashboard":
-        st.title("🔥 PROYECTO FENIX")
+        st.title("🔥 GESTION DE RECHAZO")
     elif st.session_state["vista_actual"] == "pedidos_manana":
-        st.title("📞 Pedidos para llamar")
+        st.title("📞 PREVENTIVO DE RECHAZO")
     elif st.session_state["vista_actual"] == "informacion":
         st.title("📘 Información")
 
